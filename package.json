@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "spike": "cargo run -p docx-core --bin docx-spike --",
     "spike:fixtures": "cargo run -p docx-core --bin docx-spike -- generate-fixtures",
-    "spike:run": "cargo run -p docx-core --bin docx-spike -- run"
+    "spike:run": "cargo run -p docx-core --bin docx-spike -- run",
+    "spike:iso": "cargo run -p docx-core --bin docx-spike -- iso-checklist"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
