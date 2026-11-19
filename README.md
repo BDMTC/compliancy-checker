@@ -26,7 +26,7 @@ See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for tra
 - [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on recent Windows 10/11)
 - [Rust](https://rustup.rs/) stable (`rustc`, `cargo`)
 - [Node.js](https://nodejs.org/) 20+ (npm)
-- Visual Studio Build Tools with the C++ workload (to compile Tauri on Windows)
+- Visual Studio Build Tools with the C++ workload (to compile Tauri on Windows), **or** the no-admin path below
 
 ### Linux (dev / CI)
 
@@ -65,6 +65,22 @@ cargo test -p compliancy-core
 # Full desktop app (needs platform WebView deps)
 npm run tauri dev
 ```
+
+### Windows without VS Build Tools (xwin + portable LLVM)
+
+If UAC / VS Build Tools is blocked, this machine can still build MSVC Tauri using:
+
+- `C:\Temp\toolchains\xwin` — CRT/SDK splat from [xwin](https://github.com/Jake-Shadle/xwin)
+- `C:\Temp\toolchains\llvm\clang+llvm-23.1.5-x86_64-pc-windows-msvc` — portable `clang-cl` / `lld-link` / `llvm-rc`
+- Rust target `stable-x86_64-pc-windows-msvc`
+
+Relaunch the GUI:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Temp\compliancy-checker\scripts\tauri-dev-xwin.ps1
+```
+
+GNU/`x86_64-pc-windows-gnu` is not supported for this Tauri shell (export-ordinal link failure). Prefer real VS Build Tools C++ when UAC is available.
 
 ### App UI flow
 
