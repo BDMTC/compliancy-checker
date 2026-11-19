@@ -38,7 +38,7 @@
             <label class="chip"><input type="checkbox" value="14001" /> ISO 14001</label>
             <label class="chip"><input type="checkbox" value="9001" /> ISO 9001</label>
           </div>
-          <p class="note">v1 stub: section checklist export lands later. Selection is stored for the run.</p>
+          <p class="note">Section/clause presence check against ingested .docx text. Exports <code>iso-checklist.csv</code> and <code>iso-checklist-report.txt</code> beside processed docs. Not an accreditation decision.</p>
         </section>
 
         <section class="panel" aria-labelledby="template-heading">
@@ -118,7 +118,7 @@
 
         <section class="run-bar">
           <button type="button" class="btn primary" id="run-btn">Run pipeline</button>
-          <p class="run-meta" id="run-meta">Pipeline: ingest → extract → template styles → context → export</p>
+          <p class="run-meta" id="run-meta">Pipeline: ingest → extract → template styles → context → ISO checklist → export</p>
         </section>
 
         <section class="panel log-panel" aria-labelledby="log-heading">

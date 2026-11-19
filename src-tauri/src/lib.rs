@@ -27,7 +27,8 @@ fn app_info() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "modes": ["standard", "assist"],
         "formats": ["docx"],
-        "spike": "docx template style merge"
+        "isoStandards": ["9001", "14001", "45001"],
+        "features": ["docx template style merge", "ISO section checklist export"],
     })
 }
 

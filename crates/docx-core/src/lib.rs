@@ -1,6 +1,10 @@
-//! Spike: merge factual content from a source `.docx` into a master template package.
+//! Open XML `.docx` helpers for Compliancy Checker.
 //!
-//! Strategy (Open XML):
+//! - Template style merge (transform spike)
+//! - Plain-text / heading extraction
+//! - ISO 9001 / 14001 / 45001 section presence checklist + CSV/report export
+//!
+//! Transform strategy (Open XML):
 //! 1. Start from the **template** package (styles, theme, fonts, headers/footers, structure).
 //! 2. Extract body block-level children from the **source** `word/document.xml`
 //!    (everything inside `<w:body>` except a trailing `<w:sectPr>`).
@@ -9,6 +13,15 @@
 //!
 //! Style IDs on source paragraphs (e.g. `Heading1`, `Normal`) resolve against the
 //! template's `styles.xml`, so fonts/colours come from the master as far as Open XML allows.
+
+mod extract;
+mod iso;
+
+pub use extract::{extract_docx_text, extract_from_document_xml, DocText};
+pub use iso::{
+    clauses_for, evaluate_docx, evaluate_text, merge_reports, parse_standards, write_exports,
+    ChecklistClause, ChecklistReport, Finding, IsoStandard, Presence,
+};
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -31,7 +44,7 @@ pub enum DocxError {
 
 pub type Result<T> = std::result::Result<T, DocxError>;
 
-const DOCUMENT_PATH: &str = "word/document.xml";
+pub(crate) const DOCUMENT_PATH: &str = "word/document.xml";
 
 /// Transform `source` using styles/structure from `template`, writing `output`.
 pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<()> {
@@ -81,7 +94,7 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
     Ok(())
 }
 
-fn read_zip_entry<R: Read + std::io::Seek>(
+pub(crate) fn read_zip_entry<R: Read + std::io::Seek>(
     zip: &mut ZipArchive<R>,
     path: &str,
 ) -> Result<String> {

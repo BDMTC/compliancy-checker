@@ -6,16 +6,18 @@ Two modes, one codebase:
 
 | Mode | Network / AI | Scope |
 |---|---|---|
-| **Standard** | None required | Template style merge + (stubs) structured context + ISO checklist |
+| **Standard** | None required | Template style merge + ISO section checklist export + (stub) structured context |
 | **Assist** | Optional LLM API hook (stubbed) | Same core + future semantic ISO / freeform context |
 
-## Status (spike)
+## Status
 
 - Tauri + Vite (TypeScript) app shell with ruleset UI, mode toggle, pickers, Run + log.
-- Rust Open XML `.docx` transform spike with fixtures and CLI.
+- Rust Open XML `.docx` transform with fixtures and CLI.
+- **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
 - Assist provider config UI + Rust trait/stub — **no live API calls**.
+- Structured context rules: noted in the run log only (not applied yet).
 
-See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for what the spike proves vs remaining work.
+See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for transform spike details and ISO CLI usage.
 
 ## Requirements
 
@@ -45,7 +47,12 @@ npm run spike:fixtures
 npm run spike:run
 # → crates/docx-core/spike/out/styled-output.docx
 
-# Unit test for transform
+# ISO checklist against the partial OH&S fixture (no GUI)
+npm run spike:iso
+# → crates/docx-core/spike/out/iso-checklist.csv
+# → crates/docx-core/spike/out/iso-checklist-report.txt
+
+# Unit tests (transform + checklist)
 cargo test -p docx-core
 
 # Full desktop app (needs platform WebView deps)
@@ -57,21 +64,21 @@ npm run tauri dev
 1. Choose **Standard** or **Assist**.
 2. Toggle rulesets: ISO standards, master template path, context text.
 3. Pick input `.docx` files or a folder; pick output directory.
-4. **Run pipeline** — template-enabled runs use the Rust style merge; Assist semantic steps log a stub warning.
+4. **Run pipeline** — template-enabled runs use the Rust style merge; with ISO on, checklist CSV/report are written beside outputs. Assist semantic steps log a stub warning.
 
 ## Pipeline
 
 ```
-ingest files/path → extract content → apply template styles → apply context → export
+ingest files/path → extract content → apply template styles → apply context (stub) → ISO checklist → export
 ```
 
-ISO checklist scoring and structured context application are stubbed in the shell; the `.docx` style merge is the working core for this PR.
+ISO checklist is **presence-only** (clause numbers / section title keywords in document text). It assists review; it does **not** certify accreditation. Assist-mode LLM gap narrative remains stubbed.
 
 ## Project layout
 
 ```
 ├── src/                         # Vite + TypeScript UI
-├── crates/docx-core/            # Open XML merge + CLI spike
+├── crates/docx-core/            # Open XML merge, text extract, ISO checklist
 │   └── spike/                   # Fixtures, output, spike README
 ├── src-tauri/                   # Tauri shell, pipeline, Assist stub
 └── README.md

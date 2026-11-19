@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use docx_core::{self, DocxError};
+use docx_core::{self, DocxError, IsoStandard};
 
 use crate::assist::{AssistConfig, AssistStatus, LlmProvider, StubLlmProvider};
 
@@ -124,17 +124,41 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         }
     }
 
-    if req.iso.enabled {
-        let standards = if req.iso.standards.is_empty() {
-            "none selected".into()
-        } else {
-            req.iso.standards.join(", ")
-        };
-        log.push(log_line(
-            "info",
-            format!("ISO ruleset stub: standards [{standards}] — checklist not implemented yet"),
-        ));
-    }
+    let iso_standards: Option<Vec<IsoStandard>> = if req.iso.enabled {
+        match docx_core::parse_standards(&req.iso.standards) {
+            Ok(standards) if standards.is_empty() => {
+                log.push(log_line(
+                    "warn",
+                    "ISO ruleset enabled but no standards selected — skipping checklist.",
+                ));
+                None
+            }
+            Ok(standards) => {
+                let labels = standards
+                    .iter()
+                    .map(|s| s.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                log.push(log_line(
+                    "info",
+                    format!("ISO checklist enabled: {labels}"),
+                ));
+                Some(standards)
+            }
+            Err(e) => {
+                log.push(log_line("error", e.to_string()));
+                return RunResult {
+                    ok: false,
+                    files_written,
+                    log,
+                    assist: assist_status,
+                };
+            }
+        }
+    } else {
+        log.push(log_line("info", "ISO ruleset off."));
+        None
+    };
 
     if req.context.enabled && !req.context.text.trim().is_empty() {
         let preview: String = req.context.text.chars().take(120).collect();
@@ -232,17 +256,19 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
     }
 
     let mut ok = true;
-    for input in inputs {
+    let mut iso_reports = Vec::new();
+
+    for input in &inputs {
         let file_name = input
             .file_name()
             .map(|s| s.to_os_string())
             .unwrap_or_else(|| "output.docx".into());
-        let dest = output_dir.join(file_name);
+        let dest = output_dir.join(&file_name);
 
         let result = if let Some(ref tpl) = template_path {
-            docx_core::transform_docx(&input, tpl, &dest)
+            docx_core::transform_docx(input, tpl, &dest)
         } else {
-            fs::copy(&input, &dest)
+            fs::copy(input, &dest)
                 .map(|_| ())
                 .map_err(DocxError::from)
         };
@@ -261,6 +287,65 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                     "error",
                     format!("Failed {}: {e}", input.display()),
                 ));
+                continue;
+            }
+        }
+
+        if let Some(ref standards) = iso_standards {
+            // Check the ingested source content (facts before/without style merge).
+            match docx_core::evaluate_docx(input, standards) {
+                Ok(report) => {
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "ISO checklist {}: {} present, {} missing",
+                            input
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("document"),
+                            report.present_count(),
+                            report.missing_count()
+                        ),
+                    ));
+                    iso_reports.push(report);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(log_line(
+                        "error",
+                        format!("ISO checklist failed for {}: {e}", input.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(ref standards) = iso_standards {
+        if !iso_reports.is_empty() {
+            let merged = docx_core::merge_reports(iso_reports);
+            match docx_core::write_exports(&merged, &output_dir) {
+                Ok((csv_path, txt_path)) => {
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "ISO findings exported: {} present, {} missing across {} standard(s)",
+                            merged.present_count(),
+                            merged.missing_count(),
+                            standards.len()
+                        ),
+                    ));
+                    log.push(log_line("info", format!("Wrote {csv_path}")));
+                    log.push(log_line("info", format!("Wrote {txt_path}")));
+                    files_written.push(csv_path);
+                    files_written.push(txt_path);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(log_line(
+                        "error",
+                        format!("Failed to write ISO checklist exports: {e}"),
+                    ));
+                }
             }
         }
     }
