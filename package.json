@@ -1,0 +1,26 @@
+{
+  "name": "compliancy-checker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "spike": "cargo run -p docx-core --bin docx-spike --",
+    "spike:fixtures": "cargo run -p docx-core --bin docx-spike -- generate-fixtures",
+    "spike:run": "cargo run -p docx-core --bin docx-spike -- run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-fs": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}
