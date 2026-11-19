@@ -1,23 +1,18 @@
-mod assist;
-mod pipeline;
-
-use assist::{AssistConfig, AssistStatus, StubLlmProvider};
-use pipeline::{RunRequest, RunResult};
+use compliancy_core::{AssistConfig, AssistRuntime, AssistStatus, RunRequest, RunResult};
 
 #[tauri::command]
 fn get_assist_status(mode: String, assist: Option<AssistConfig>) -> AssistStatus {
-    let cfg = assist.unwrap_or_default();
     let mode = if mode.eq_ignore_ascii_case("assist") {
         "assist"
     } else {
         "standard"
     };
-    StubLlmProvider::from_config(cfg).status(mode)
+    AssistRuntime::for_mode(mode, assist).status
 }
 
 #[tauri::command]
 fn run_pipeline(request: RunRequest) -> RunResult {
-    pipeline::run_pipeline(request)
+    compliancy_core::run_pipeline(request)
 }
 
 #[tauri::command]
@@ -31,7 +26,8 @@ fn app_info() -> serde_json::Value {
         "features": [
             "docx template style merge",
             "ISO section checklist export",
-            "structured context rules"
+            "structured context rules",
+            "Assist OpenAI-compatible LLM hook"
         ],
     })
 }

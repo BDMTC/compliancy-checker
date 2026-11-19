@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/docx-core", "src-tauri"]
+members = ["crates/docx-core", "crates/compliancy-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

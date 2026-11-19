@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Assist secrets (never commit API keys)
+.compliancy-assist.json
+assist.local.json
+assist.json
+
 # Rust / Tauri
 /target
 crates/docx-core/spike/out
