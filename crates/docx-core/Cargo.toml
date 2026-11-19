@@ -1,0 +1,15 @@
+[package]
+name = "docx-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Open XML .docx style-merge helpers for Compliancy Checker"
+publish = false
+
+[[bin]]
+name = "docx-spike"
+path = "src/bin/docx_spike.rs"
+
+[dependencies]
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compliancy Checker</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="brand">Compliancy Checker</p>
+          <p class="tagline">Local document transform · ISO checklist-ready</p>
+        </div>
+        <div class="mode-toggle" role="group" aria-label="Product mode">
+          <button type="button" class="mode-btn is-active" data-mode="standard" id="mode-standard">
+            Standard
+          </button>
+          <button type="button" class="mode-btn" data-mode="assist" id="mode-assist">
+            Assist
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel" aria-labelledby="iso-heading">
+          <div class="panel-head">
+            <label class="check">
+              <input type="checkbox" id="iso-enabled" checked />
+              <span id="iso-heading">ISO ruleset</span>
+            </label>
+            <span class="hint">45001 / 14001 / 9001</span>
+          </div>
+          <div class="chip-row" id="iso-standards">
+            <label class="chip"><input type="checkbox" value="45001" checked /> ISO 45001</label>
+            <label class="chip"><input type="checkbox" value="14001" /> ISO 14001</label>
+            <label class="chip"><input type="checkbox" value="9001" /> ISO 9001</label>
+          </div>
+          <p class="note">v1 stub: section checklist export lands later. Selection is stored for the run.</p>
+        </section>
+
+        <section class="panel" aria-labelledby="template-heading">
+          <div class="panel-head">
+            <label class="check">
+              <input type="checkbox" id="template-enabled" checked />
+              <span id="template-heading">Master template</span>
+            </label>
+            <span class="hint">Fonts · colours · structure</span>
+          </div>
+          <div class="field-row">
+            <input type="text" id="template-path" readonly placeholder="Choose a master .docx template…" />
+            <button type="button" class="btn secondary" id="pick-template">Browse</button>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="context-heading">
+          <div class="panel-head">
+            <label class="check">
+              <input type="checkbox" id="context-enabled" />
+              <span id="context-heading">Context</span>
+            </label>
+            <span class="hint">Global or batch instructions</span>
+          </div>
+          <textarea
+            id="context-text"
+            rows="3"
+            placeholder="e.g. Always include Revision History; force Heading 1 names to match template…"
+          ></textarea>
+        </section>
+
+        <section class="panel panel-ingest" aria-labelledby="ingest-heading">
+          <div class="panel-head">
+            <h2 id="ingest-heading">Ingest &amp; export</h2>
+          </div>
+          <div class="field-row">
+            <input type="text" id="input-paths" readonly placeholder="Select .docx files or a folder…" />
+            <button type="button" class="btn secondary" id="pick-files">Files</button>
+            <button type="button" class="btn secondary" id="pick-folder">Folder</button>
+          </div>
+          <div class="field-row">
+            <input type="text" id="output-dir" readonly placeholder="Output directory…" />
+            <button type="button" class="btn secondary" id="pick-output">Browse</button>
+          </div>
+        </section>
+
+        <section class="panel assist-panel is-hidden" id="assist-panel" aria-labelledby="assist-heading">
+          <div class="panel-head">
+            <h2 id="assist-heading">Assist API hook</h2>
+            <span class="hint">Stubbed — no live calls</span>
+          </div>
+          <div class="assist-grid">
+            <label>
+              Provider
+              <select id="assist-provider">
+                <option value="none">None</option>
+                <option value="openai">OpenAI</option>
+                <option value="azure">Azure OpenAI</option>
+                <option value="local">Local model</option>
+              </select>
+            </label>
+            <label>
+              Model
+              <input type="text" id="assist-model" placeholder="optional" />
+            </label>
+            <label class="span-2">
+              Endpoint
+              <input type="text" id="assist-endpoint" placeholder="https://… (optional)" />
+            </label>
+            <label class="span-2">
+              API key
+              <input type="password" id="assist-api-key" placeholder="Stored in memory only for this session" autocomplete="off" />
+            </label>
+          </div>
+          <p class="note" id="assist-status">Standard mode stays offline.</p>
+        </section>
+
+        <section class="run-bar">
+          <button type="button" class="btn primary" id="run-btn">Run pipeline</button>
+          <p class="run-meta" id="run-meta">Pipeline: ingest → extract → template styles → context → export</p>
+        </section>
+
+        <section class="panel log-panel" aria-labelledby="log-heading">
+          <div class="panel-head">
+            <h2 id="log-heading">Run log</h2>
+            <button type="button" class="btn ghost" id="clear-log">Clear</button>
+          </div>
+          <pre id="log" class="log" aria-live="polite"></pre>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
