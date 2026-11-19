@@ -3,6 +3,7 @@
 //! - Template style merge (transform spike)
 //! - Plain-text / heading extraction
 //! - ISO 9001 / 14001 / 45001 section presence checklist + CSV/report export
+//! - Structured context rules (force heading, replace, require section)
 //!
 //! Transform strategy (Open XML):
 //! 1. Start from the **template** package (styles, theme, fonts, headers/footers, structure).
@@ -14,9 +15,14 @@
 //! Style IDs on source paragraphs (e.g. `Heading1`, `Normal`) resolve against the
 //! template's `styles.xml`, so fonts/colours come from the master as far as Open XML allows.
 
+mod context;
 mod extract;
 mod iso;
 
+pub use context::{
+    apply_context_to_docx, evaluate_context_docx, evaluate_context_text, parse_context_rules,
+    write_context_exports, ContextReport, ContextRule, RuleAction, RuleFinding, RuleOp,
+};
 pub use extract::{extract_docx_text, extract_from_document_xml, DocText};
 pub use iso::{
     clauses_for, evaluate_docx, evaluate_text, merge_reports, parse_standards, write_exports,
@@ -276,7 +282,7 @@ fn paragraph_xml(style_id: &str, text: &str) -> String {
     )
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

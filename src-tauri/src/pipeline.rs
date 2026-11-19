@@ -160,19 +160,53 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         None
     };
 
-    if req.context.enabled && !req.context.text.trim().is_empty() {
-        let preview: String = req.context.text.chars().take(120).collect();
-        log.push(log_line(
-            "info",
-            format!("Context ruleset noted (structured apply TODO): {preview}"),
-        ));
-        if mode == "assist" {
+    let context_rules = if req.context.enabled {
+        if req.context.text.trim().is_empty() {
             log.push(log_line(
-                "info",
-                "Assist would interpret freeform context here (stubbed).",
+                "warn",
+                "Context ruleset enabled but empty — skipping.",
             ));
+            None
+        } else {
+            match docx_core::parse_context_rules(&req.context.text) {
+                Ok(rules) if rules.is_empty() => {
+                    log.push(log_line(
+                        "warn",
+                        "Context ruleset parsed to zero rules — skipping.",
+                    ));
+                    None
+                }
+                Ok(rules) => {
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "Context ruleset: {} structured rule(s) (line/JSON; no LLM).",
+                            rules.len()
+                        ),
+                    ));
+                    if mode == "assist" {
+                        log.push(log_line(
+                            "info",
+                            "Assist freeform NLP remains stubbed; Standard structured rules still apply.",
+                        ));
+                    }
+                    Some(rules)
+                }
+                Err(e) => {
+                    log.push(log_line("error", e.to_string()));
+                    return RunResult {
+                        ok: false,
+                        files_written,
+                        log,
+                        assist: assist_status,
+                    };
+                }
+            }
         }
-    }
+    } else {
+        log.push(log_line("info", "Context ruleset off."));
+        None
+    };
 
     let inputs = match collect_docx_inputs(&req.input_paths) {
         Ok(v) => v,
@@ -257,6 +291,7 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
 
     let mut ok = true;
     let mut iso_reports = Vec::new();
+    let mut context_report = docx_core::ContextReport::default();
 
     for input in &inputs {
         let file_name = input
@@ -291,6 +326,35 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
             }
         }
 
+        if let Some(ref rules) = context_rules {
+            match docx_core::apply_context_to_docx(&dest, rules) {
+                Ok(report) => {
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "Context {}: {} applied/replaced, {} required misses",
+                            dest.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("document"),
+                            report.applied_count(),
+                            report.missing_count()
+                        ),
+                    ));
+                    if report.missing_count() > 0 {
+                        ok = false;
+                    }
+                    context_report.extend(report);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(log_line(
+                        "error",
+                        format!("Context rules failed for {}: {e}", dest.display()),
+                    ));
+                }
+            }
+        }
+
         if let Some(ref standards) = iso_standards {
             // Check the ingested source content (facts before/without style merge).
             match docx_core::evaluate_docx(input, standards) {
@@ -316,6 +380,32 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                         format!("ISO checklist failed for {}: {e}", input.display()),
                     ));
                 }
+            }
+        }
+    }
+
+    if context_rules.is_some() && !context_report.findings.is_empty() {
+        match docx_core::write_context_exports(&context_report, &output_dir) {
+            Ok((csv_path, txt_path)) => {
+                log.push(log_line(
+                    "info",
+                    format!(
+                        "Context findings exported: {} applied/replaced, {} required misses",
+                        context_report.applied_count(),
+                        context_report.missing_count()
+                    ),
+                ));
+                log.push(log_line("info", format!("Wrote {csv_path}")));
+                log.push(log_line("info", format!("Wrote {txt_path}")));
+                files_written.push(csv_path);
+                files_written.push(txt_path);
+            }
+            Err(e) => {
+                ok = false;
+                log.push(log_line(
+                    "error",
+                    format!("Failed to write context rule exports: {e}"),
+                ));
             }
         }
     }

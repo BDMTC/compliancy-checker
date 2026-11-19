@@ -1,0 +1,11 @@
+# Compliancy Checker — structured context rules (batch-global example)
+# Paste into the Context rules panel, or pass to: docx-spike context-rules
+
+force_heading: Revision History
+require_section: Revision History
+require_heading: Site Safety Report
+replace: Acme Works Ltd => ACME Works Limited
+
+# Per-document scope (basename match). Use `document: *` to return to global.
+# document: sample-input.docx
+# replace: DRAFT => FINAL

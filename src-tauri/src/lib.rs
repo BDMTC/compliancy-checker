@@ -28,7 +28,11 @@ fn app_info() -> serde_json::Value {
         "modes": ["standard", "assist"],
         "formats": ["docx"],
         "isoStandards": ["9001", "14001", "45001"],
-        "features": ["docx template style merge", "ISO section checklist export"],
+        "features": [
+            "docx template style merge",
+            "ISO section checklist export",
+            "structured context rules"
+        ],
     })
 }
 

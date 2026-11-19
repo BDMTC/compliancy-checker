@@ -17,6 +17,7 @@ dist-ssr
 crates/docx-core/spike/out
 crates/docx-core/spike/fixtures-test
 crates/docx-core/spike/fixtures-iso-test
+crates/docx-core/spike/fixtures-context-test
 
 # Editor directories and files
 .vscode/*

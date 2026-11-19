@@ -59,15 +59,21 @@
           <div class="panel-head">
             <label class="check">
               <input type="checkbox" id="context-enabled" />
-              <span id="context-heading">Context</span>
+              <span id="context-heading">Context rules</span>
             </label>
-            <span class="hint">Global or batch instructions</span>
+            <span class="hint">Structured · batch or per-doc</span>
           </div>
           <textarea
             id="context-text"
-            rows="3"
-            placeholder="e.g. Always include Revision History; force Heading 1 names to match template…"
+            rows="6"
+            placeholder="# Line rules (or paste JSON { &quot;rules&quot;: [...] })
+force_heading: Revision History
+require_section: Document Control
+replace: Acme Works Ltd => ACME Works Limited
+# document: site-report.docx
+# replace: DRAFT => FINAL"
           ></textarea>
+          <p class="note">Deterministic rule language only (no LLM). Ops: <code>force_heading</code>, <code>require_section</code>, <code>require_heading</code>, <code>replace</code>, optional <code>document:</code> scope. See README.</p>
         </section>
 
         <section class="panel panel-ingest" aria-labelledby="ingest-heading">
