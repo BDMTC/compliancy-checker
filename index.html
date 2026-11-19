@@ -73,7 +73,7 @@ replace: Acme Works Ltd => ACME Works Limited
 # document: site-report.docx
 # replace: DRAFT => FINAL"
           ></textarea>
-          <p class="note">Deterministic rule language only (no LLM). Ops: <code>force_heading</code>, <code>require_section</code>, <code>require_heading</code>, <code>replace</code>, optional <code>document:</code> scope. See README.</p>
+          <p class="note">Deterministic rule language (no LLM in Standard). Ops: <code>force_heading</code>, <code>require_section</code>, <code>require_heading</code>, <code>replace</code>, optional <code>document:</code>. In Assist mode, freeform prose outside that language is interpreted via the optional LLM.</p>
         </section>
 
         <section class="panel panel-ingest" aria-labelledby="ingest-heading">
@@ -93,8 +93,8 @@ replace: Acme Works Ltd => ACME Works Limited
 
         <section class="panel assist-panel is-hidden" id="assist-panel" aria-labelledby="assist-heading">
           <div class="panel-head">
-            <h2 id="assist-heading">Assist API hook</h2>
-            <span class="hint">Stubbed — no live calls</span>
+            <h2 id="assist-heading">Assist API</h2>
+            <span class="hint">Optional · OpenAI-compatible</span>
           </div>
           <div class="assist-grid">
             <label>
@@ -103,22 +103,24 @@ replace: Acme Works Ltd => ACME Works Limited
                 <option value="none">None</option>
                 <option value="openai">OpenAI</option>
                 <option value="azure">Azure OpenAI</option>
-                <option value="local">Local model</option>
+                <option value="local">Local / compatible</option>
+                <option value="mock">Mock (fixtures, no network)</option>
               </select>
             </label>
             <label>
               Model
-              <input type="text" id="assist-model" placeholder="optional" />
+              <input type="text" id="assist-model" placeholder="gpt-4o-mini (default)" />
             </label>
             <label class="span-2">
               Endpoint
-              <input type="text" id="assist-endpoint" placeholder="https://… (optional)" />
+              <input type="text" id="assist-endpoint" placeholder="https://api.openai.com/v1 (or Azure/local URL)" />
             </label>
             <label class="span-2">
               API key
-              <input type="password" id="assist-api-key" placeholder="Stored in memory only for this session" autocomplete="off" />
+              <input type="password" id="assist-api-key" placeholder="Session only — or COMPLIANCY_ASSIST_API_KEY / assist.json" autocomplete="off" />
             </label>
           </div>
+          <p class="note">Used for ISO gap narrative and freeform context interpretation. Standard mode never calls the network. See README Assist section.</p>
           <p class="note" id="assist-status">Standard mode stays offline.</p>
         </section>
 

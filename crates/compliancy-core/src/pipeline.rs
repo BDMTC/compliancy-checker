@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use docx_core::{self, DocxError, IsoStandard};
 
-use crate::assist::{AssistConfig, AssistStatus, LlmProvider, StubLlmProvider};
+use crate::assist::{
+    self, interpret_freeform_context, iso_gap_narrative, looks_like_freeform_context, AssistConfig,
+    AssistRuntime, AssistStatus,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,7 +103,7 @@ fn is_docx(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Run the local pipeline. Assist semantic steps are stubbed.
+/// Run the local pipeline. Assist semantic steps only run in Assist mode when configured.
 pub fn run_pipeline(req: RunRequest) -> RunResult {
     let mut log = Vec::new();
     let mut files_written = Vec::new();
@@ -111,18 +114,10 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         "standard"
     };
 
-    let assist_cfg = req.assist.clone().unwrap_or_default();
-    let provider = StubLlmProvider::from_config(assist_cfg);
-    let assist_status = provider.status(mode);
+    let assist_rt = AssistRuntime::for_mode(mode, req.assist.clone());
+    let assist_status = assist_rt.status.clone();
     log.push(log_line("info", format!("Mode: {mode}")));
     log.push(log_line("info", assist_status.message.clone()));
-
-    if mode == "assist" {
-        match provider.complete("ISO gap narrative placeholder") {
-            Ok(_) => {}
-            Err(msg) => log.push(log_line("warn", msg)),
-        }
-    }
 
     let iso_standards: Option<Vec<IsoStandard>> = if req.iso.enabled {
         match docx_core::parse_standards(&req.iso.standards) {
@@ -160,6 +155,9 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         None
     };
 
+    let mut freeform_context: Option<String> = None;
+    let mut structured_context_summary: Option<String> = None;
+
     let context_rules = if req.context.enabled {
         if req.context.text.trim().is_empty() {
             log.push(log_line(
@@ -168,38 +166,56 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
             ));
             None
         } else {
-            match docx_core::parse_context_rules(&req.context.text) {
+            let raw = req.context.text.clone();
+            let wants_freeform = mode == "assist" && looks_like_freeform_context(&raw);
+            match docx_core::parse_context_rules(&raw) {
                 Ok(rules) if rules.is_empty() => {
                     log.push(log_line(
                         "warn",
-                        "Context ruleset parsed to zero rules — skipping.",
+                        "Context ruleset parsed to zero rules — skipping structured apply.",
                     ));
+                    if wants_freeform || mode == "assist" {
+                        freeform_context = Some(raw);
+                    }
                     None
                 }
                 Ok(rules) => {
                     log.push(log_line(
                         "info",
                         format!(
-                            "Context ruleset: {} structured rule(s) (line/JSON; no LLM).",
+                            "Context ruleset: {} structured rule(s) (line/JSON; applied locally).",
                             rules.len()
                         ),
                     ));
-                    if mode == "assist" {
+                    structured_context_summary = Some(format!("{} structured rule(s) parsed", rules.len()));
+                    if wants_freeform {
                         log.push(log_line(
                             "info",
-                            "Assist freeform NLP remains stubbed; Standard structured rules still apply.",
+                            "Assist will also interpret freeform lines that are outside the rule language.",
                         ));
+                        freeform_context = Some(raw);
                     }
                     Some(rules)
                 }
                 Err(e) => {
-                    log.push(log_line("error", e.to_string()));
-                    return RunResult {
-                        ok: false,
-                        files_written,
-                        log,
-                        assist: assist_status,
-                    };
+                    if mode == "assist" {
+                        log.push(log_line(
+                            "warn",
+                            format!(
+                                "Structured context parse failed ({e}); Assist will try freeform interpretation."
+                            ),
+                        ));
+                        freeform_context = Some(raw);
+                        None
+                    } else {
+                        log.push(log_line("error", e.to_string()));
+                        return RunResult {
+                            ok: false,
+                            files_written,
+                            log,
+                            assist: assist_status,
+                        };
+                    }
                 }
             }
         }
@@ -410,9 +426,12 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         }
     }
 
+    let mut iso_text_for_assist: Option<String> = None;
+
     if let Some(ref standards) = iso_standards {
         if !iso_reports.is_empty() {
             let merged = docx_core::merge_reports(iso_reports);
+            iso_text_for_assist = Some(merged.to_text_report());
             match docx_core::write_exports(&merged, &output_dir) {
                 Ok((csv_path, txt_path)) => {
                     log.push(log_line(
@@ -440,10 +459,235 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         }
     }
 
+    // Assist semantic steps — only when Assist mode has a configured (live or mock) provider.
+    if mode == "assist" && assist_rt.can_call() {
+        if let Some(ref checklist_txt) = iso_text_for_assist {
+            match iso_gap_narrative(assist_rt.provider.as_ref(), checklist_txt) {
+                Ok(narrative) => {
+                    let path = output_dir.join("iso-gap-narrative.txt");
+                    match assist::write_text_export(&path, &narrative) {
+                        Ok(()) => {
+                            let path_s = path.display().to_string();
+                            log.push(log_line(
+                                "info",
+                                format!(
+                                    "Assist ISO gap narrative via '{}' ({} chars).",
+                                    assist_rt.provider.name(),
+                                    narrative.len()
+                                ),
+                            ));
+                            log.push(log_line("info", format!("Wrote {path_s}")));
+                            files_written.push(path_s);
+                        }
+                        Err(e) => {
+                            ok = false;
+                            log.push(log_line(
+                                "error",
+                                format!("Failed to write ISO gap narrative: {e}"),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log.push(log_line(
+                        "warn",
+                        format!("Assist ISO gap narrative skipped: {e}"),
+                    ));
+                }
+            }
+        }
+
+        if let Some(ref freeform) = freeform_context {
+            match interpret_freeform_context(
+                assist_rt.provider.as_ref(),
+                freeform,
+                structured_context_summary.as_deref(),
+            ) {
+                Ok(interpretation) => {
+                    let path = output_dir.join("assist-context-interpretation.txt");
+                    match assist::write_text_export(&path, &interpretation) {
+                        Ok(()) => {
+                            let path_s = path.display().to_string();
+                            log.push(log_line(
+                                "info",
+                                format!(
+                                    "Assist freeform context interpretation via '{}' ({} chars).",
+                                    assist_rt.provider.name(),
+                                    interpretation.len()
+                                ),
+                            ));
+                            log.push(log_line("info", format!("Wrote {path_s}")));
+                            files_written.push(path_s);
+                        }
+                        Err(e) => {
+                            ok = false;
+                            log.push(log_line(
+                                "error",
+                                format!("Failed to write Assist context interpretation: {e}"),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log.push(log_line(
+                        "warn",
+                        format!("Assist freeform context skipped: {e}"),
+                    ));
+                }
+            }
+        }
+    } else if mode == "assist" && !assist_rt.can_call() {
+        if iso_text_for_assist.is_some() || freeform_context.is_some() {
+            log.push(log_line(
+                "info",
+                "Assist semantic steps skipped (provider not configured). Checklist/context still ran locally.",
+            ));
+        }
+    }
+
     RunResult {
         ok,
         files_written,
         log,
         assist: assist_status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use docx_core::{write_minimal_docx, SAMPLE_STYLES};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fixture_docx(dir: &Path) -> PathBuf {
+        let path = dir.join("sample.docx");
+        write_minimal_docx(
+            &path,
+            "Heading1",
+            "Normal",
+            &[
+                ("title", "4.1 Context of the organization"),
+                ("body", "OH&S policy and worker consultation."),
+            ],
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn standard_mode_makes_no_assist_exports() {
+        let _g = env_lock().lock().unwrap();
+        std::env::remove_var(assist::ENV_MOCK);
+        std::env::remove_var(assist::ENV_API_KEY);
+        std::env::remove_var(assist::ENV_PROVIDER);
+
+        let dir = std::env::temp_dir().join("compliancy-assist-pipeline-std");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let input = fixture_docx(&dir);
+        let out = dir.join("out");
+
+        let result = run_pipeline(RunRequest {
+            mode: "standard".into(),
+            input_paths: vec![input.display().to_string()],
+            output_dir: out.display().to_string(),
+            iso: IsoRuleset {
+                enabled: true,
+                standards: vec!["45001".into()],
+            },
+            template: TemplateRuleset {
+                enabled: false,
+                template_path: None,
+            },
+            context: ContextRuleset {
+                enabled: true,
+                text: "force_heading: Scope\nrequire_section: Context of the organization".into(),
+            },
+            assist: Some(AssistConfig {
+                provider: "openai".into(),
+                api_key: Some("sk-should-not-be-used".into()),
+                endpoint: None,
+                model: None,
+            }),
+        });
+
+        assert!(result.ok, "{:?}", result.log);
+        assert!(!result.assist.live_calls_enabled);
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Standard mode") && l.message.contains("offline")));
+        assert!(!result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("iso-gap-narrative.txt")));
+        assert!(!result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("assist-context-interpretation.txt")));
+    }
+
+    #[test]
+    fn assist_mock_writes_iso_and_context_fixtures() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var(assist::ENV_MOCK, "1");
+        std::env::remove_var(assist::ENV_API_KEY);
+
+        let dir = std::env::temp_dir().join("compliancy-assist-pipeline-mock");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let input = fixture_docx(&dir);
+        let out = dir.join("out");
+
+        let result = run_pipeline(RunRequest {
+            mode: "assist".into(),
+            input_paths: vec![input.display().to_string()],
+            output_dir: out.display().to_string(),
+            iso: IsoRuleset {
+                enabled: true,
+                standards: vec!["45001".into()],
+            },
+            template: TemplateRuleset {
+                enabled: false,
+                template_path: None,
+            },
+            context: ContextRuleset {
+                enabled: true,
+                text: "Please make the tone more formal and ensure residual OH&S risk is covered."
+                    .into(),
+            },
+            assist: Some(AssistConfig {
+                provider: "mock".into(),
+                api_key: None,
+                endpoint: None,
+                model: None,
+            }),
+        });
+
+        std::env::remove_var(assist::ENV_MOCK);
+
+        assert!(result.ok, "{:?}", result.log);
+        assert_eq!(result.assist.provider, "mock");
+        assert!(result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("iso-gap-narrative.txt")));
+        assert!(result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("assist-context-interpretation.txt")));
+
+        let narrative = fs::read_to_string(out.join("iso-gap-narrative.txt")).unwrap();
+        assert!(narrative.contains("MOCK ISO gap narrative"));
+        let interpretation =
+            fs::read_to_string(out.join("assist-context-interpretation.txt")).unwrap();
+        assert!(interpretation.contains("MOCK freeform context"));
     }
 }
