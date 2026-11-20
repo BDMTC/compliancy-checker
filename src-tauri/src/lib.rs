@@ -35,17 +35,18 @@ fn app_info() -> serde_json::Value {
         "name": "Compliancy Checker",
         "version": env!("CARGO_PKG_VERSION"),
         "modes": ["standard", "assist"],
-        "formats": ["docx"],
+        "formats": ["docx", "pdf"],
         "isoStandards": ["9001", "14001", "45001"],
         "features": [
             "docx template style merge",
+            "PDF master template cues + PDF export",
             "template trait preview + picker",
             "ISO section checklist export",
             "structured context rules",
             "Assist OpenAI-compatible LLM hook"
         ],
         "notes": {
-            "pdf": "PDF ingest/export tracked separately (CC-11) — not in this release"
+            "pdf": "PDF masters supply style/layout cues (fonts, colours, page size); export regenerates PDF from extracted text. Scanned PDFs / OCR out of scope."
         },
     })
 }

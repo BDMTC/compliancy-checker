@@ -63,8 +63,18 @@ pub struct TemplatePreviewSummary {
 pub struct TemplatePreview {
     pub path: String,
     pub file_name: String,
+    /// `docx` or `pdf` — which inspect path produced this preview.
+    #[serde(default = "default_template_format")]
+    pub format: String,
     pub traits: Vec<DetectedTrait>,
     pub summary: TemplatePreviewSummary,
+    /// Documented capability limits (especially for PDF masters).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<String>,
+}
+
+fn default_template_format() -> String {
+    "docx".into()
 }
 
 /// Which detected traits the user wants applied on merge.
@@ -328,6 +338,7 @@ pub fn inspect_template(path: &Path) -> Result<TemplatePreview> {
     Ok(TemplatePreview {
         path: path.display().to_string(),
         file_name,
+        format: "docx".into(),
         summary: TemplatePreviewSummary {
             fonts: fonts_seen.into_iter().collect(),
             colours: colours_seen.into_iter().collect(),
@@ -336,6 +347,7 @@ pub fn inspect_template(path: &Path) -> Result<TemplatePreview> {
             style_count,
         },
         traits,
+        limits: Vec::new(),
     })
 }
 

@@ -24,6 +24,9 @@ crates/docx-core/spike/fixtures-test
 crates/docx-core/spike/fixtures-test-*
 crates/docx-core/spike/fixtures-iso-test
 crates/docx-core/spike/fixtures-context-test
+crates/pdf-core/spike/out
+crates/pdf-core/spike/fixtures-test
+crates/pdf-core/spike/fixtures-test-*
 
 # Editor directories and files
 .vscode/*

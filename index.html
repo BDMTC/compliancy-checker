@@ -50,7 +50,7 @@
             <span class="hint">Preview · pick traits · then apply</span>
           </div>
           <div class="field-row field-row-template">
-            <input type="text" id="template-path" readonly placeholder="Choose a master .docx template…" />
+            <input type="text" id="template-path" readonly placeholder="Choose a master .docx or .pdf template…" />
             <button type="button" class="btn secondary" id="pick-template">Browse</button>
           </div>
           <div id="template-preview" class="template-preview is-empty" hidden>
@@ -64,7 +64,8 @@
             <div class="template-swatches" id="template-swatches" aria-label="Detected colours"></div>
             <p class="template-preview-meta" id="template-preview-meta"></p>
             <div class="trait-list" id="trait-list" role="group" aria-label="Detected template traits"></div>
-            <p class="note">Detected fonts, colours, and backgrounds. Select all, one, or any subset — only checked traits are applied on merge. PDF ingest/export is later (CC-11).</p>
+            <p class="note" id="template-limits-note">Detected fonts, colours, and backgrounds. Select all, one, or any subset — only checked traits are applied. PDF masters supply cues (not a pixel-perfect restyle); see limits below when a PDF is loaded.</p>
+            <ul class="template-limits" id="template-limits" hidden></ul>
           </div>
         </section>
 
@@ -102,6 +103,12 @@ replace: Acme Works Ltd => ACME Works Limited
             <input type="text" id="output-dir" readonly placeholder="Output directory…" />
             <button type="button" class="btn secondary" id="pick-output">Browse</button>
           </div>
+          <div class="field-row output-format-row" role="group" aria-label="Output format">
+            <span class="output-format-label">Save as</span>
+            <label class="chip"><input type="radio" name="output-format" value="docx" checked /> Word (.docx)</label>
+            <label class="chip"><input type="radio" name="output-format" value="pdf" /> PDF (.pdf)</label>
+          </div>
+          <p class="note">PDF export regenerates a new PDF from extracted text + selected style cues (standard Type1 fonts). It is not a binary restyle of an existing PDF.</p>
         </section>
 
         <section class="panel assist-panel is-hidden" id="assist-panel" aria-labelledby="assist-heading">

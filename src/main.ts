@@ -37,6 +37,7 @@ type DetectedTrait = {
 type TemplatePreview = {
   path: string;
   fileName: string;
+  format?: string;
   traits: DetectedTrait[];
   summary: {
     fonts: string[];
@@ -45,6 +46,7 @@ type TemplatePreview = {
     hasBackgroundChrome: boolean;
     styleCount: number;
   };
+  limits?: string[];
 };
 
 const state = {
@@ -124,6 +126,7 @@ function kindLabel(kind: DetectedTrait["kind"]): string {
 
 function renderTemplatePreview(preview: TemplatePreview | null) {
   const panel = $("template-preview");
+  const limitsEl = $("template-limits");
   if (!preview || preview.traits.length === 0) {
     state.templatePreview = null;
     state.selectedTraitIds = null;
@@ -132,6 +135,8 @@ function renderTemplatePreview(preview: TemplatePreview | null) {
     $("trait-list").textContent = "";
     $("template-swatches").textContent = "";
     $("template-preview-meta").textContent = "";
+    limitsEl.hidden = true;
+    limitsEl.textContent = "";
     return;
   }
 
@@ -141,7 +146,8 @@ function renderTemplatePreview(preview: TemplatePreview | null) {
 
   panel.hidden = false;
   panel.classList.remove("is-empty");
-  $("template-preview-title").textContent = preview.fileName;
+  const formatLabel = (preview.format || "docx").toUpperCase();
+  $("template-preview-title").textContent = `${preview.fileName} (${formatLabel})`;
 
   const swatches = $("template-swatches");
   swatches.textContent = "";
@@ -165,8 +171,10 @@ function renderTemplatePreview(preview: TemplatePreview | null) {
   const fill = preview.summary.backgroundFill
     ? `#${preview.summary.backgroundFill}`
     : "no page fill";
+  const unit =
+    preview.format === "pdf" ? "page(s)" : "style(s)";
   $("template-preview-meta").textContent =
-    `${preview.traits.length} trait(s) · ${preview.summary.styleCount} style(s) · fonts: ${fonts} · ${fill} · ${chrome}`;
+    `${preview.traits.length} trait(s) · ${preview.summary.styleCount} ${unit} · fonts: ${fonts} · ${fill} · ${chrome}`;
 
   const list = $("trait-list");
   list.textContent = "";
@@ -205,6 +213,18 @@ function renderTemplatePreview(preview: TemplatePreview | null) {
       group.appendChild(label);
     }
     list.appendChild(group);
+  }
+
+  limitsEl.textContent = "";
+  if (preview.limits && preview.limits.length > 0) {
+    limitsEl.hidden = false;
+    for (const limit of preview.limits) {
+      const li = document.createElement("li");
+      li.textContent = limit;
+      limitsEl.appendChild(li);
+    }
+  } else {
+    limitsEl.hidden = true;
   }
 }
 
@@ -250,12 +270,23 @@ async function pickTemplate() {
   const selected = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: "Word", extensions: ["docx"] }],
+    filters: [
+      { name: "Templates", extensions: ["docx", "pdf"] },
+      { name: "Word", extensions: ["docx"] },
+      { name: "PDF", extensions: ["pdf"] },
+    ],
   });
   if (typeof selected === "string") {
     ($("template-path") as HTMLInputElement).value = selected;
     await loadTemplatePreview(selected);
   }
+}
+
+function selectedOutputFormat(): "docx" | "pdf" {
+  const checked = document.querySelector<HTMLInputElement>(
+    'input[name="output-format"]:checked',
+  );
+  return checked?.value === "pdf" ? "pdf" : "docx";
 }
 
 async function pickFiles() {
@@ -312,6 +343,7 @@ async function runPipeline() {
       mode: state.mode,
       inputPaths: state.inputPaths,
       outputDir: ($("output-dir") as HTMLInputElement).value,
+      outputFormat: selectedOutputFormat(),
       iso: {
         enabled: ($("iso-enabled") as HTMLInputElement).checked,
         standards: selectedIsoStandards(),

@@ -223,6 +223,28 @@ body {
   font-size: 0.82rem;
 }
 
+.template-limits {
+  margin: 0.55rem 0 0;
+  padding-left: 1.15rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.template-limits li {
+  margin-bottom: 0.25rem;
+}
+
+.output-format-row {
+  grid-template-columns: auto 1fr 1fr;
+  align-items: center;
+  margin-top: 0.35rem;
+}
+
+.output-format-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .trait-list {
   display: grid;
   gap: 0.65rem;

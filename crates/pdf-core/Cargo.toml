@@ -1,0 +1,17 @@
+[package]
+name = "pdf-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "PDF master-template inspect + PDF export for Compliancy Checker"
+publish = false
+
+[[bin]]
+name = "pdf-spike"
+path = "src/bin/pdf_spike.rs"
+
+[dependencies]
+docx-core = { path = "../docx-core" }
+lopdf = "0.34"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
