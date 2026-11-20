@@ -8,7 +8,7 @@ Also runs the **ISO section presence checklist** and **structured context rules*
 
 1. Opens both packages as ZIP (Office Open XML).
 2. Starts from the **template** package (styles, theme, media, section properties, relationships).
-3. Keeps document `w:background` and body **chrome** (behind-doc drawings / drawing-only paragraphs) from the template.
+3. Keeps document `w:background` and **leading behind-doc** body chrome (`behindDoc="1"` only — not template inline photos).
 4. Replaces the remaining template body (except trailing `w:sectPr`) with the source body paragraphs.
 5. Strips source **presentation** direct formatting (`w:color`, fonts, sizes, …) so template **per-style** colours apply — Heading styles keep their own colours; Normal/body uses the body colour (not one flattened global colour).
 6. Writes `styled-output.docx`.
@@ -126,7 +126,7 @@ Covers style merge, text extraction, ISO present/missing + export round-trip, an
 **Still TODO**
 
 - Headers/footers (when not already on the template package), numbering, tables, inline content images from the source.
-- Mid-document chrome placement for multi-page template backgrounds (currently all chrome is prepended).
+- Mid-document behind-doc section backgrounds (only the leading page chrome is kept today).
 - Style-ID remapping when source custom styles don’t exist on the template.
 - UI: after master template load, preview + picker of detected style traits (colours, backgrounds, fonts) to apply all / one / a subset.
 - Required-section / field validation from the master template.

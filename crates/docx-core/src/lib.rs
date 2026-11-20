@@ -143,8 +143,8 @@ fn extract_body_inner(document_xml: &str) -> Result<String> {
 /// Replace template body content (except trailing sectPr + chrome) with `source_inner`.
 ///
 /// Preserves template `w:background` (outside `w:body`) via the document prefix, and
-/// re-injects body chrome (behind-doc drawings / drawing-only paragraphs) so background
-/// fills and images from the master are not discarded with the template's placeholder text.
+/// re-injects **leading behind-doc** body chrome so page fills stay behind text without
+/// pulling in template inline photos (which would sit in-flow and push content down).
 fn splice_body_content(template_document: &str, source_inner: &str) -> Result<String> {
     let body_open = find_tag_end(template_document, "w:body")
         .ok_or_else(|| DocxError::Message("template missing <w:body>".into()))?;
@@ -188,23 +188,30 @@ fn splice_body_content(template_document: &str, source_inner: &str) -> Result<St
     Ok(out)
 }
 
-/// Body paragraphs that carry page/background visuals (not factual text).
+/// Leading page-background chrome from the template body.
 ///
-/// Word often stores branded backgrounds as `wp:anchor behindDoc="1"` DrawingML (or VML
-/// picts) inside ordinary body paragraphs — not only as `w:background`. Those must be
-/// kept when swapping in source text.
+/// Word stores branded page fills as `wp:anchor behindDoc="1"` (DrawingML) and/or VML
+/// picts with negative `z-index` — often in the first body paragraph(s), **before** real
+/// text. Mid-document inline photos (`wp:inline`) are template *content*, not chrome:
+/// prepending them puts images in front of / above the merged body and shifts text down.
+///
+/// We only keep behind-doc anchors from the **prefix** (until the first meaningful text
+/// paragraph), and normalize paragraph spacing so chrome does not add vertical gap.
 fn extract_template_chrome(template_body_inner: &str) -> String {
     let mut chrome = String::new();
     let mut rest = template_body_inner;
     while let Some(start) = find_next_open_tag(rest, "w:p") {
-        let abs = rest;
-        let from = &abs[start..];
+        let from = &rest[start..];
         let Some(end) = find_element_end(from, "w:p") else {
             break;
         };
         let para = &from[..end];
-        if is_chrome_paragraph(para) {
-            chrome.push_str(para);
+        if paragraph_has_meaningful_text(para) {
+            // End of leading chrome — do not pull mid-doc section backgrounds or photos.
+            break;
+        }
+        if is_behind_doc_chrome(para) {
+            chrome.push_str(&normalize_chrome_paragraph(para));
             chrome.push('\n');
         }
         rest = &from[end..];
@@ -212,15 +219,14 @@ fn extract_template_chrome(template_body_inner: &str) -> String {
     chrome
 }
 
-fn is_chrome_paragraph(para: &str) -> bool {
-    let has_draw = para.contains("<w:drawing>") || para.contains("<w:pict>");
-    if !has_draw {
-        return false;
-    }
+/// True only for floating anchors marked behind the document (not inline drawings).
+fn is_behind_doc_chrome(para: &str) -> bool {
     if para.contains("behindDoc=\"1\"") {
         return true;
     }
-    !paragraph_has_meaningful_text(para)
+    // VML fallback used by Word AlternateContent: negative z-index = behind text.
+    para.contains("<w:pict>")
+        && (para.contains("z-index:-") || para.contains("z-index: -"))
 }
 
 fn paragraph_has_meaningful_text(para: &str) -> bool {
@@ -241,6 +247,74 @@ fn paragraph_has_meaningful_text(para: &str) -> bool {
         rest = &after[content_start + close + "</w:t>".len()..];
     }
     false
+}
+
+/// Zero out paragraph spacing on chrome so behind-doc anchors do not displace body text.
+fn normalize_chrome_paragraph(para: &str) -> String {
+    let spacing =
+        r#"<w:spacing w:before="0" w:after="0" w:line="0" w:lineRule="auto"/>"#;
+    if let Some(ppr_start) = find_next_open_tag(para, "w:pPr") {
+        let from = &para[ppr_start..];
+        if let Some(ppr_end) = find_element_end(from, "w:pPr") {
+            let ppr = &from[..ppr_end];
+            let first_gt = match ppr.find('>') {
+                Some(i) => i,
+                None => return para.to_string(),
+            };
+            let mut inner = if ppr.as_bytes().get(first_gt.saturating_sub(1)) == Some(&b'/') {
+                String::new()
+            } else {
+                ppr[first_gt + 1..ppr.len() - "</w:pPr>".len()].to_string()
+            };
+            // Drop existing spacing children, then force zero spacing.
+            inner = strip_named_children(&inner, &["w:spacing"]);
+            let new_ppr = format!("<w:pPr>{spacing}{inner}</w:pPr>");
+            return format!(
+                "{}{}{}",
+                &para[..ppr_start],
+                new_ppr,
+                &from[ppr_end..]
+            );
+        }
+    }
+    // No pPr — insert one after the opening <w:p …>.
+    if let Some(gt) = para.find('>') {
+        return format!(
+            "{}<w:pPr>{spacing}</w:pPr>{}",
+            &para[..=gt],
+            &para[gt + 1..]
+        );
+    }
+    para.to_string()
+}
+
+fn strip_named_children(inner: &str, names: &[&str]) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let from = &rest[lt..];
+        if from.starts_with("</") {
+            out.push('<');
+            rest = &from[1..];
+            continue;
+        }
+        let name_end = from[1..]
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        let name = &from[1..name_end];
+        if names.iter().any(|s| *s == name) {
+            if let Some(end) = find_element_end(from, name) {
+                rest = &from[end..];
+                continue;
+            }
+        }
+        out.push('<');
+        rest = &from[1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Remove presentation direct-formatting that would override template style colours/fonts.
@@ -811,6 +885,11 @@ mod tests {
             document.contains("r:embed=") || document.contains("a:blip"),
             "background image relationship/blip must survive"
         );
+        // Slim fixture chrome is behindDoc-only (no template inline photos prepended).
+        assert!(
+            !document.contains("<wp:inline"),
+            "template inline photos must not be prepended as chrome (pushes text / sits in front)"
+        );
         assert!(
             names.iter().any(|k| k.starts_with("word/media/")),
             "template media part must remain in package"
@@ -847,5 +926,99 @@ mod tests {
         assert!(!out.contains("w:rFonts"));
         assert!(!out.contains("w:sz"));
         assert!(out.contains(">Hi<"));
+    }
+
+    #[test]
+    fn chrome_keeps_leading_behind_doc_skips_inline_and_mid_doc() {
+        let body = r#"
+<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:drawing><wp:anchor behindDoc="1" relativeHeight="1"><wp:wrapNone/></wp:anchor></w:drawing></w:r></w:p>
+<w:p><w:r><w:drawing><wp:inline><wp:extent cx="1" cy="1"/></wp:inline></w:drawing></w:r></w:p>
+<w:p><w:r><w:t>Who we are</w:t></w:r></w:p>
+<w:p><w:r><w:drawing><wp:anchor behindDoc="1" relativeHeight="2"><wp:wrapNone/></wp:anchor></w:drawing></w:r></w:p>
+"#;
+        let chrome = extract_template_chrome(body);
+        assert!(chrome.contains("behindDoc=\"1\""));
+        assert!(chrome.contains("relativeHeight=\"1\""));
+        assert!(
+            !chrome.contains("<wp:inline"),
+            "inline photos are not chrome"
+        );
+        assert!(
+            !chrome.contains("relativeHeight=\"2\""),
+            "mid-doc behindDoc after text must not be prepended"
+        );
+        assert!(
+            chrome.contains(r#"w:spacing w:before="0""#),
+            "chrome spacing normalized to avoid pushing text down"
+        );
+        assert!(!chrome.contains("Who we are"));
+    }
+
+    #[test]
+    fn transform_full_master_does_not_prepend_inline_photos() {
+        let master = PathBuf::from(
+            "/cursor/stores/bc-dcb61577-a4fb-44e3-9ea5-6fcaadf23034/internal/fixtures/master-template-example.docx",
+        );
+        if !master.exists() || master.metadata().map(|m| m.len()).unwrap_or(0) < 1_000_000 {
+            // Store copy of Beau's full master not available in this environment.
+            return;
+        }
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures-test-full-bg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.docx");
+        let output = dir.join("out.docx");
+
+        write_minimal_docx(
+            &source,
+            "Heading1",
+            "Normal",
+            &[
+                ("title", "Couples Alignment Blueprint"),
+                ("body", "Factual body line that must stay near the top."),
+            ],
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+
+        transform_docx(&source, &master, &output).unwrap();
+        let (document, _, _) = read_out(&output);
+
+        assert!(document.contains("Couples Alignment Blueprint"));
+        assert!(document.contains("behindDoc=\"1\""));
+        assert!(
+            !document.contains("<wp:inline"),
+            "must not prepend template inline photos"
+        );
+        // First text should appear early — not after a stack of photo paragraphs.
+        let paras: Vec<&str> = {
+            let mut v = Vec::new();
+            let mut rest = document.as_str();
+            while let Some(start) = find_next_open_tag(rest, "w:p") {
+                let from = &rest[start..];
+                let Some(end) = find_element_end(from, "w:p") else {
+                    break;
+                };
+                v.push(&from[..end]);
+                rest = &from[end..];
+            }
+            v
+        };
+        let first_text = paras.iter().position(|p| paragraph_has_meaningful_text(p));
+        assert!(
+            matches!(first_text, Some(i) if i <= 2),
+            "text should follow leading behind-doc chrome only, got first_text={first_text:?}"
+        );
+        let behind_before_text = paras
+            .iter()
+            .take(first_text.unwrap_or(0))
+            .filter(|p| p.contains("behindDoc=\"1\""))
+            .count();
+        assert_eq!(
+            behind_before_text, 1,
+            "only the leading page background behindDoc should be prepended"
+        );
     }
 }
