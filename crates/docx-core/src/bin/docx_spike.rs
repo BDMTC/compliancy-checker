@@ -4,6 +4,8 @@
 //!   cargo run -p docx-core --bin docx-spike -- generate-fixtures
 //!   cargo run -p docx-core --bin docx-spike -- run
 //!   cargo run -p docx-core --bin docx-spike -- run --source PATH --template PATH --output PATH
+//!   cargo run -p docx-core --bin docx-spike -- run --traits fonts,colours,background
+//!   cargo run -p docx-core --bin docx-spike -- inspect-template --template PATH
 //!   cargo run -p docx-core --bin docx-spike -- iso-checklist --source PATH --standards 45001,9001 --output-dir PATH
 //!   cargo run -p docx-core --bin docx-spike -- context-rules --source PATH --rules PATH --output-dir PATH
 
@@ -12,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use docx_core::{
-    apply_context_to_docx, evaluate_docx, parse_context_rules, parse_standards, transform_docx,
-    write_context_exports, write_exports, write_minimal_docx, SAMPLE_STYLES, TEMPLATE_STYLES,
+    apply_context_to_docx, evaluate_docx, inspect_template, parse_context_rules, parse_standards,
+    transform_docx_with_options, write_context_exports, write_exports, write_minimal_docx,
+    TransformOptions, SAMPLE_STYLES, TEMPLATE_STYLES,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -109,7 +112,12 @@ fn generate_fixtures(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_spike(source: &Path, template: &Path, output: &Path) -> Result<(), String> {
+fn run_spike(
+    source: &Path,
+    template: &Path,
+    output: &Path,
+    opts: TransformOptions,
+) -> Result<(), String> {
     if !source.exists() {
         return Err(format!("source not found: {}", source.display()));
     }
@@ -120,11 +128,42 @@ fn run_spike(source: &Path, template: &Path, output: &Path) -> Result<(), String
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    transform_docx(source, template, output).map_err(|e| e.to_string())?;
+    transform_docx_with_options(source, template, output, opts).map_err(|e| e.to_string())?;
     println!("OK — wrote {}", output.display());
     println!(
-        "Open in Word/LibreOffice: factual text from source, fonts/colours from template styles.xml."
+        "Applied traits: fonts={}, colours={}, background={}",
+        opts.apply_fonts, opts.apply_colours, opts.apply_background
     );
+    println!(
+        "Open in Word/LibreOffice: factual text from source; selected template traits applied."
+    );
+    Ok(())
+}
+
+fn run_inspect_template(template: &Path) -> Result<(), String> {
+    if !template.exists() {
+        return Err(format!("template not found: {}", template.display()));
+    }
+    let preview = inspect_template(template).map_err(|e| e.to_string())?;
+    println!("Template: {}", preview.path);
+    println!(
+        "Summary: {} trait(s), {} style(s), fonts={:?}, colours={}, fill={:?}, chrome={}",
+        preview.traits.len(),
+        preview.summary.style_count,
+        preview.summary.fonts,
+        preview.summary.colours.len(),
+        preview.summary.background_fill,
+        preview.summary.has_background_chrome
+    );
+    for t in &preview.traits {
+        println!(
+            "  [{}] {} — {} ({})",
+            t.kind.as_str(),
+            t.id,
+            t.label,
+            t.value
+        );
+    }
     Ok(())
 }
 
@@ -205,6 +244,7 @@ fn print_usage() {
 Commands:
   generate-fixtures          Write sample, template, and iso-45001-partial.docx under spike/fixtures
   run [options]              Transform fixtures (or custom paths) to an output .docx
+  inspect-template [options] Detect fonts / colours / backgrounds for the trait picker
   iso-checklist [options]    Section/clause presence checklist → CSV + text report
   context-rules [options]    Apply structured context rules → mutated .docx + report
 
@@ -212,6 +252,10 @@ Options for run:
   --source PATH              Default: crates/docx-core/spike/fixtures/sample-input.docx
   --template PATH            Default: crates/docx-core/spike/fixtures/master-template.docx
   --output PATH              Default: crates/docx-core/spike/out/styled-output.docx
+  --traits LIST              fonts,colours,background (default: all) — or none
+
+Options for inspect-template:
+  --template PATH            Default: crates/docx-core/spike/fixtures/master-template-example.docx
 
 Options for iso-checklist:
   --source PATH              Default: crates/docx-core/spike/fixtures/iso-45001-partial.docx
@@ -243,6 +287,7 @@ fn main() {
             let mut template = fixtures.join("master-template.docx");
             let mut output =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/out/styled-output.docx");
+            let mut traits_csv = "all".to_string();
 
             let mut i = 0;
             while i < args.len() {
@@ -258,6 +303,13 @@ fn main() {
                     "--output" => {
                         i += 1;
                         output = PathBuf::from(args.get(i).expect("--output needs a path"));
+                    }
+                    "--traits" => {
+                        i += 1;
+                        traits_csv = args
+                            .get(i)
+                            .expect("--traits needs a value")
+                            .clone();
                     }
                     other => {
                         eprintln!("Unknown argument: {other}");
@@ -277,7 +329,36 @@ fn main() {
                 template = fixtures.join("master-template.docx");
             }
 
-            run_spike(&source, &template, &output)
+            let opts = match TransformOptions::from_csv(&traits_csv) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(2);
+                }
+            };
+            run_spike(&source, &template, &output, opts)
+        }
+        "inspect-template" => {
+            let mut template = fixtures.join("master-template-example.docx");
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--template" => {
+                        i += 1;
+                        template = PathBuf::from(args.get(i).expect("--template needs a path"));
+                    }
+                    other => {
+                        eprintln!("Unknown argument: {other}");
+                        print_usage();
+                        process::exit(2);
+                    }
+                }
+                i += 1;
+            }
+            if !template.exists() {
+                template = fixtures.join("master-template.docx");
+            }
+            run_inspect_template(&template)
         }
         "iso-checklist" => {
             let mut source = fixtures.join("iso-45001-partial.docx");

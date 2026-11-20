@@ -22,6 +22,7 @@
 mod context;
 mod extract;
 mod iso;
+mod traits;
 
 pub use context::{
     apply_context_to_docx, evaluate_context_docx, evaluate_context_text, parse_context_rules,
@@ -31,6 +32,10 @@ pub use extract::{extract_docx_text, extract_from_document_xml, DocText};
 pub use iso::{
     clauses_for, evaluate_docx, evaluate_text, merge_reports, parse_standards, write_exports,
     ChecklistClause, ChecklistReport, Finding, IsoStandard, Presence,
+};
+pub use traits::{
+    inspect_template, options_from_template, traits_by_kind, DetectedTrait, TemplatePreview,
+    TemplatePreviewSummary, TraitKind, TraitSelection, TransformOptions,
 };
 
 use std::collections::HashMap;
@@ -62,7 +67,21 @@ pub(crate) const DOCUMENT_PATH: &str = "word/document.xml";
 /// master template. Body text resolves through Normal/body; headings keep Heading*
 /// colours. Source direct colour/font/size overrides are stripped so they cannot
 /// flatten or mask those template definitions.
+///
+/// Applies **all** detected traits. Prefer [`transform_docx_with_options`] when the
+/// UI/CLI picker has narrowed fonts / colours / backgrounds.
 pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<()> {
+    transform_docx_with_options(source, template, output, TransformOptions::all())
+}
+
+/// Like [`transform_docx`], but only applies the trait categories enabled in `opts`
+/// (from the template preview picker: all / one / any subset).
+pub fn transform_docx_with_options(
+    source: &Path,
+    template: &Path,
+    output: &Path,
+    opts: TransformOptions,
+) -> Result<()> {
     let source_bytes = std::fs::read(source)?;
     let template_bytes = std::fs::read(template)?;
 
@@ -70,11 +89,19 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
     let mut template_zip = ZipArchive::new(Cursor::new(template_bytes))?;
 
     let source_document = read_zip_entry(&mut source_zip, DOCUMENT_PATH)?;
-    let template_document = read_zip_entry(&mut template_zip, DOCUMENT_PATH)?;
+    let mut template_document = read_zip_entry(&mut template_zip, DOCUMENT_PATH)?;
+
+    if !opts.apply_background {
+        template_document = traits::strip_document_background(&template_document);
+    }
 
     let source_inner = extract_body_inner(&source_document)?;
-    let source_inner = strip_presentation_overrides(&source_inner);
-    let mut merged_document = splice_body_content(&template_document, &source_inner)?;
+    let source_inner = traits::strip_presentation_for_options(&source_inner, opts);
+    let mut merged_document = if opts.apply_background {
+        splice_body_content(&template_document, &source_inner)?
+    } else {
+        splice_body_content_without_chrome(&template_document, &source_inner)?
+    };
 
     let mut parts: HashMap<String, Vec<u8>> = HashMap::new();
     for i in 0..template_zip.len() {
@@ -85,12 +112,24 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
         }
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
+        // Scrub unselected font/colour definitions out of styles parts so the
+        // template package cannot re-introduce them via style IDs.
+        let base = name.rsplit('/').next().unwrap_or(name.as_str());
+        if base.starts_with("styles") && base.ends_with(".xml") {
+            if let Ok(text) = std::str::from_utf8(&data) {
+                data = traits::scrub_styles_for_options(text, opts).into_bytes();
+            }
+        }
         parts.insert(name, data);
     }
 
     // Belt-and-braces page fill from theme accent2 when document has no w:background.
-    if let Some(fill) = theme_accent2_hex(&parts) {
-        merged_document = ensure_document_background(&merged_document, &fill);
+    if opts.apply_background {
+        if let Some(fill) = theme_accent2_hex(&parts) {
+            merged_document = ensure_document_background(&merged_document, &fill);
+        }
+    } else {
+        merged_document = traits::strip_document_background(&merged_document);
     }
     parts.insert(DOCUMENT_PATH.to_string(), merged_document.into_bytes());
 
@@ -152,6 +191,22 @@ fn extract_body_inner(document_xml: &str) -> Result<String> {
 /// cannot sit in a spacer paragraph that pushes text down. Template `wp:inline` photos are
 /// never treated as chrome.
 fn splice_body_content(template_document: &str, source_inner: &str) -> Result<String> {
+    splice_body_content_inner(template_document, source_inner, true)
+}
+
+/// Same as [`splice_body_content`] but skips behind-doc chrome injection (background trait off).
+fn splice_body_content_without_chrome(
+    template_document: &str,
+    source_inner: &str,
+) -> Result<String> {
+    splice_body_content_inner(template_document, source_inner, false)
+}
+
+fn splice_body_content_inner(
+    template_document: &str,
+    source_inner: &str,
+    apply_chrome: bool,
+) -> Result<String> {
     let body_open = find_tag_end(template_document, "w:body")
         .ok_or_else(|| DocxError::Message("template missing <w:body>".into()))?;
     let body_close = template_document
@@ -172,21 +227,24 @@ fn splice_body_content(template_document: &str, source_inner: &str) -> Result<St
         }
     }
 
-    let chrome_runs = extract_leading_behind_doc_runs(&inner_wo_sect);
-    let chrome_runs = pin_anchors_behind_page(&chrome_runs);
-    let body_with_chrome = inject_runs_into_first_paragraph(source_inner, &chrome_runs);
+    let body_content = if apply_chrome {
+        let chrome_runs = extract_leading_behind_doc_runs(&inner_wo_sect);
+        let chrome_runs = pin_anchors_behind_page(&chrome_runs);
+        inject_runs_into_first_paragraph(source_inner, &chrome_runs)
+    } else {
+        source_inner.to_string()
+    };
 
     let mut new_inner = String::new();
     new_inner.push('\n');
-    new_inner.push_str(&body_with_chrome);
+    new_inner.push_str(&body_content);
     new_inner.push('\n');
     if !sect_pr.is_empty() {
         new_inner.push_str(&sect_pr);
         new_inner.push('\n');
     }
 
-    let mut out =
-        String::with_capacity(template_document.len() + body_with_chrome.len() + chrome_runs.len());
+    let mut out = String::with_capacity(template_document.len() + body_content.len());
     out.push_str(&template_document[..body_open]);
     out.push_str(&new_inner);
     out.push_str(&template_document[body_close..]);
@@ -456,96 +514,6 @@ fn inject_runs_into_first_paragraph(body: &str, runs: &str) -> String {
         }
     }
     format!("<w:p>{runs}</w:p>\n{body}")
-}
-
-/// Remove presentation direct-formatting that would override template style colours/fonts.
-///
-/// Keeps `w:pStyle` / `w:rStyle` so Heading1 vs Normal (and character styles) still select
-/// distinct template colours. Semantic emphasis (`w:b`, `w:i`, …) is left intact.
-fn strip_presentation_overrides(xml: &str) -> String {
-    let mut out = String::with_capacity(xml.len());
-    let mut rest = xml;
-    while let Some(start) = rest.find("<w:rPr") {
-        out.push_str(&rest[..start]);
-        let from = &rest[start..];
-        let Some(end) = find_element_end(from, "w:rPr") else {
-            out.push_str(from);
-            return out;
-        };
-        let rpr = &from[..end];
-        let cleaned = clean_rpr_element(rpr);
-        out.push_str(&cleaned);
-        rest = &from[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn clean_rpr_element(rpr: &str) -> String {
-    let first_gt = match rpr.find('>') {
-        Some(i) => i,
-        None => return rpr.to_string(),
-    };
-    // Self-closing empty rPr
-    if rpr.as_bytes().get(first_gt.saturating_sub(1)) == Some(&b'/') {
-        return String::new();
-    }
-    let inner = &rpr[first_gt + 1..rpr.len() - "</w:rPr>".len()];
-    let cleaned_inner = strip_presentation_children(inner);
-    if cleaned_inner
-        .chars()
-        .all(|c| c.is_whitespace())
-    {
-        return String::new();
-    }
-    format!("<w:rPr>{cleaned_inner}</w:rPr>")
-}
-
-fn strip_presentation_children(inner: &str) -> String {
-    // Child local names that paint presentation from the source and must yield to template styles.
-    const STRIP: &[&str] = &[
-        "w:color",
-        "w:rFonts",
-        "w:sz",
-        "w:szCs",
-        "w:highlight",
-        "w:shd",
-        "w:bdr",
-        "w:em",
-        "w:snapToGrid",
-        "w:spacing", // character spacing
-        "w:w",       // character scale
-        "w:kern",
-        "w:position",
-        "w:vanish",
-    ];
-    let mut out = String::with_capacity(inner.len());
-    let mut rest = inner;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        let from = &rest[lt..];
-        if from.starts_with("</") {
-            // Unexpected close — copy through
-            out.push('<');
-            rest = &from[1..];
-            continue;
-        }
-        let name_end = from[1..]
-            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let name = &from[1..name_end];
-        if STRIP.iter().any(|s| *s == name) {
-            if let Some(end) = find_element_end(from, name) {
-                rest = &from[end..];
-                continue;
-            }
-        }
-        out.push('<');
-        rest = &from[1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 fn find_next_open_tag(xml: &str, local: &str) -> Option<usize> {
@@ -1063,7 +1031,7 @@ mod tests {
     #[test]
     fn strip_presentation_keeps_bold_and_styles() {
         let xml = r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:i/><w:color w:val="FF0000"/><w:rFonts w:ascii="Arial"/></w:rPr><w:t>Hi</w:t></w:r></w:p>"#;
-        let out = strip_presentation_overrides(xml);
+        let out = traits::strip_presentation_for_options(xml, TransformOptions::all());
         assert!(out.contains("w:pStyle w:val=\"Heading1\""));
         assert!(out.contains("<w:b/>"));
         assert!(out.contains("<w:i/>"));
@@ -1114,6 +1082,81 @@ mod tests {
             rest = &from[end..];
         }
         assert_eq!(para_count, 1);
+    }
+
+    #[test]
+    fn transform_with_options_can_skip_background_and_keep_source_fonts() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures");
+        let template = fixtures.join("master-template-example.docx");
+        assert!(template.exists());
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures-test-traits-apply");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.docx");
+        let output = dir.join("out.docx");
+
+        write_docx_with_direct_formatting(
+            &source,
+            "Heading1",
+            "Normal",
+            &[
+                ("title", "Selective Traits Report"),
+                ("body", "Customer: Acme Works Ltd"),
+            ],
+            SAMPLE_STYLES,
+        )
+        .unwrap();
+
+        let preview = inspect_template(&template).unwrap();
+        let colour_ids: Vec<String> = preview
+            .traits
+            .iter()
+            .filter(|t| t.kind == TraitKind::Colour)
+            .map(|t| t.id.clone())
+            .collect();
+        assert!(!colour_ids.is_empty());
+
+        let opts = TransformOptions::from_selection(
+            &preview.traits,
+            &TraitSelection {
+                selected_ids: Some(colour_ids),
+            },
+        );
+        assert!(opts.apply_colours);
+        assert!(!opts.apply_fonts);
+        assert!(!opts.apply_background);
+
+        transform_docx_with_options(&source, &template, &output, opts).unwrap();
+        let (document, parts, _) = read_out(&output);
+
+        assert!(document.contains("Acme Works Ltd"));
+        assert!(
+            !document.contains("behindDoc=\"1\""),
+            "background chrome must stay off when background traits unselected"
+        );
+        assert!(
+            !document.contains("<w:background"),
+            "page fill must stay off when background traits unselected"
+        );
+        // Colours stripped from source; fonts kept.
+        assert!(!document.contains("<w:color"));
+        assert!(
+            document.contains("Times New Roman") || document.contains("w:rFonts"),
+            "source fonts should survive when font traits unselected"
+        );
+
+        let styles = parts
+            .get("word/styles2.xml")
+            .expect("styles2.xml from master");
+        assert!(
+            !styles.contains("w:rFonts"),
+            "template style fonts scrubbed when fonts unselected"
+        );
+        assert!(
+            styles.contains("w:color") || styles.contains("068145"),
+            "template style colours kept when colour traits selected"
+        );
     }
 
     #[test]

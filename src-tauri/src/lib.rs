@@ -1,4 +1,8 @@
-use compliancy_core::{AssistConfig, AssistRuntime, AssistStatus, RunRequest, RunResult};
+use std::path::PathBuf;
+
+use compliancy_core::{
+    AssistConfig, AssistRuntime, AssistStatus, RunRequest, RunResult, TemplatePreview,
+};
 
 #[tauri::command]
 fn get_assist_status(mode: String, assist: Option<AssistConfig>) -> AssistStatus {
@@ -15,6 +19,16 @@ fn run_pipeline(request: RunRequest) -> RunResult {
     compliancy_core::run_pipeline(request)
 }
 
+/// Partially load a master template: detect fonts / colours / backgrounds for the picker.
+#[tauri::command]
+fn inspect_template(path: String) -> Result<TemplatePreview, String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("template not found: {path}"));
+    }
+    compliancy_core::inspect_template(&p).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn app_info() -> serde_json::Value {
     serde_json::json!({
@@ -25,10 +39,14 @@ fn app_info() -> serde_json::Value {
         "isoStandards": ["9001", "14001", "45001"],
         "features": [
             "docx template style merge",
+            "template trait preview + picker",
             "ISO section checklist export",
             "structured context rules",
             "Assist OpenAI-compatible LLM hook"
         ],
+        "notes": {
+            "pdf": "PDF ingest/export tracked separately (CC-11) — not in this release"
+        },
     })
 }
 
@@ -41,6 +59,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             get_assist_status,
+            inspect_template,
             run_pipeline
         ])
         .run(tauri::generate_context!())

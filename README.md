@@ -13,9 +13,12 @@ Two modes, one codebase:
 
 - Tauri + Vite (TypeScript) app shell with ruleset UI, mode toggle, pickers, Run + log.
 - Rust Open XML `.docx` transform with fixtures and CLI.
+- **Master template trait preview + picker:** on template load, detect fonts / colours / backgrounds; select all, one, or a subset before merge apply.
 - **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
 - **Structured context rules (Standard):** deterministic line/JSON rule language (force heading, find/replace, require section/heading); applied after template merge; writes `context-rules.csv` + `context-rules-report.txt`.
 - **Assist live API hook:** OpenAI-compatible HTTP (OpenAI / Azure / local). Mock fixtures for CI. Standard mode never constructs a live client.
+
+Follow-ups (not this PR): **CC-11** PDF ingest/export; **CC-12** ISO card **RUN FIRST** (checklist before pipeline; pass toast / fail modal + Print).
 
 See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for transform spike details, ISO CLI, and context-rules CLI usage.
 
@@ -86,9 +89,10 @@ GNU/`x86_64-pc-windows-gnu` is not supported for this Tauri shell (export-ordina
 
 1. Choose **Standard** or **Assist**.
 2. Toggle rulesets: ISO standards, master template path, context rules text.
-3. In Assist: pick provider / model / endpoint; set API key (UI, env, or local config).
-4. Pick input `.docx` files or a folder; pick output directory.
-5. **Run pipeline** — template style merge → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports.
+3. Browse a master `.docx` — preview detected traits (fonts / colours / backgrounds) and select all, one, or a subset before apply.
+4. In Assist: pick provider / model / endpoint; set API key (UI, env, or local config).
+5. Pick input `.docx` files or a folder; pick output directory.
+6. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports.
 
 ## Pipeline
 

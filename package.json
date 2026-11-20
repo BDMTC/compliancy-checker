@@ -11,6 +11,7 @@
     "spike": "cargo run -p docx-core --bin docx-spike --",
     "spike:fixtures": "cargo run -p docx-core --bin docx-spike -- generate-fixtures",
     "spike:run": "cargo run -p docx-core --bin docx-spike -- run",
+    "spike:inspect-template": "cargo run -p docx-core --bin docx-spike -- inspect-template",
     "spike:iso": "cargo run -p docx-core --bin docx-spike -- iso-checklist",
     "spike:context": "cargo run -p docx-core --bin docx-spike -- context-rules",
     "test:rust": "cargo test -p docx-core && cargo test -p compliancy-core",

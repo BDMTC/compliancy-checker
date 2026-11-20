@@ -14,3 +14,9 @@ pub use assist::{
 pub use pipeline::{
     run_pipeline, ContextRuleset, IsoRuleset, RunLogLine, RunRequest, RunResult, TemplateRuleset,
 };
+
+/// Re-export template preview / trait picker types for the Tauri shell.
+pub use docx_core::{
+    inspect_template, DetectedTrait, TemplatePreview, TemplatePreviewSummary, TraitKind,
+    TraitSelection, TransformOptions,
+};
