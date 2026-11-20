@@ -154,6 +154,112 @@ body {
   cursor: pointer;
 }
 
+.iso-run-first-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-top: 0.7rem;
+}
+
+.iso-run-first-note {
+  margin: 0;
+  flex: 1;
+}
+
+.btn.secondary {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.iso-pass-toast {
+  position: fixed;
+  top: 1.25rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(-0.5rem);
+  z-index: 40;
+  max-width: min(36rem, calc(100vw - 2rem));
+  padding: 0.75rem 1.1rem;
+  background: var(--ok);
+  color: #fff;
+  font-weight: 650;
+  box-shadow: 0 8px 24px rgba(21, 32, 40, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.iso-pass-toast.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+
+.iso-fail-dialog {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0;
+  max-width: min(34rem, calc(100vw - 2rem));
+  width: 100%;
+}
+
+.iso-fail-dialog::backdrop {
+  background: rgba(21, 32, 40, 0.45);
+}
+
+.iso-fail-form {
+  padding: 1.1rem 1.15rem 1rem;
+}
+
+.iso-fail-form h2 {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  color: var(--error);
+}
+
+.iso-fail-reasons {
+  margin: 0.65rem 0 0;
+  padding-left: 1.15rem;
+  max-height: 14rem;
+  overflow: auto;
+  font-size: 0.9rem;
+}
+
+.iso-fail-reasons li {
+  margin-bottom: 0.35rem;
+}
+
+.iso-fail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  #iso-print-root,
+  #iso-print-root * {
+    visibility: visible !important;
+  }
+
+  #iso-print-root {
+    position: absolute;
+    inset: 0;
+    padding: 1rem;
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 11pt;
+    color: #000;
+    background: #fff;
+  }
+}
+
 .field-row {
   display: grid;
   grid-template-columns: 1fr auto auto;

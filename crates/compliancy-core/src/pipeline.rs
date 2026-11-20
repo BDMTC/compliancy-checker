@@ -74,6 +74,285 @@ pub struct RunResult {
     pub assist: AssistStatus,
 }
 
+/// Request for ISO card **RUN FIRST** — checklist only, before the main pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoFirstRequest {
+    pub input_paths: Vec<String>,
+    /// One or more of: 45001, 14001, 9001
+    pub standards: Vec<String>,
+    /// Optional: when set, write `iso-checklist.csv` + `iso-checklist-report.txt` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoFirstResult {
+    /// Command completed without hard errors (I/O, bad standards, etc.).
+    pub ok: bool,
+    /// All checklist clauses present (`missing_count == 0`).
+    pub passed: bool,
+    /// Human labels for the selected standards, e.g. `["ISO 45001", "ISO 9001"]`.
+    pub standards_labels: Vec<String>,
+    /// Pass toast copy: `Compliancy passes: {selected}`.
+    pub pass_message: String,
+    /// Missing clause reasons (from checklist findings) for the fail popup.
+    pub reasons: Vec<String>,
+    pub csv: String,
+    pub report_text: String,
+    /// Combined CSV + text report for the Print action.
+    pub combined_report: String,
+    pub files_written: Vec<String>,
+    pub log: Vec<RunLogLine>,
+}
+
+fn combined_iso_print_report(csv: &str, report_text: &str) -> String {
+    let mut out = String::new();
+    out.push_str("Compliancy Checker — ISO RUN FIRST combined report\n");
+    out.push_str("==================================================\n\n");
+    out.push_str("--- Text report ---\n");
+    out.push_str(report_text);
+    if !report_text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n--- CSV ---\n");
+    out.push_str(csv);
+    if !csv.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn missing_reasons(report: &docx_core::ChecklistReport) -> Vec<String> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.status == docx_core::Presence::Missing)
+        .map(|f| {
+            format!(
+                "{} — {} {} ({})",
+                f.document,
+                f.standard.label(),
+                f.clause,
+                f.title
+            )
+        })
+        .collect()
+}
+
+/// Run the ISO section checklist only (no template / context / document export).
+/// Used by the ISO card **RUN FIRST** control.
+pub fn run_iso_first(req: IsoFirstRequest) -> IsoFirstResult {
+    let mut log = Vec::new();
+    let mut files_written = Vec::new();
+
+    log.push(log_line("info", "ISO RUN FIRST — checklist before pipeline."));
+
+    if req.input_paths.is_empty() {
+        log.push(log_line("error", "Choose input files or a folder."));
+        return IsoFirstResult {
+            ok: false,
+            passed: false,
+            standards_labels: Vec::new(),
+            pass_message: String::new(),
+            reasons: vec!["Choose input files or a folder.".into()],
+            csv: String::new(),
+            report_text: String::new(),
+            combined_report: String::new(),
+            files_written,
+            log,
+        };
+    }
+
+    let standards = match docx_core::parse_standards(&req.standards) {
+        Ok(s) if s.is_empty() => {
+            log.push(log_line(
+                "error",
+                "Select at least one ISO standard (9001 / 14001 / 45001).",
+            ));
+            return IsoFirstResult {
+                ok: false,
+                passed: false,
+                standards_labels: Vec::new(),
+                pass_message: String::new(),
+                reasons: vec![
+                    "Select at least one ISO standard (9001 / 14001 / 45001).".into(),
+                ],
+                csv: String::new(),
+                report_text: String::new(),
+                combined_report: String::new(),
+                files_written,
+                log,
+            };
+        }
+        Ok(s) => s,
+        Err(e) => {
+            log.push(log_line("error", e.to_string()));
+            return IsoFirstResult {
+                ok: false,
+                passed: false,
+                standards_labels: Vec::new(),
+                pass_message: String::new(),
+                reasons: vec![e.to_string()],
+                csv: String::new(),
+                report_text: String::new(),
+                combined_report: String::new(),
+                files_written,
+                log,
+            };
+        }
+    };
+
+    let standards_labels: Vec<String> = standards.iter().map(|s| s.label().to_string()).collect();
+    let selected = standards_labels.join(", ");
+    let pass_message = format!("Compliancy passes: {selected}");
+    log.push(log_line(
+        "info",
+        format!("ISO RUN FIRST standards: {selected}"),
+    ));
+
+    let inputs = match collect_docx_inputs(&req.input_paths) {
+        Ok(v) if v.is_empty() => {
+            log.push(log_line(
+                "error",
+                "No .docx inputs found for ISO RUN FIRST.",
+            ));
+            return IsoFirstResult {
+                ok: false,
+                passed: false,
+                standards_labels,
+                pass_message,
+                reasons: vec!["No .docx inputs found for ISO RUN FIRST.".into()],
+                csv: String::new(),
+                report_text: String::new(),
+                combined_report: String::new(),
+                files_written,
+                log,
+            };
+        }
+        Ok(v) => v,
+        Err(e) => {
+            log.push(log_line("error", e.clone()));
+            return IsoFirstResult {
+                ok: false,
+                passed: false,
+                standards_labels,
+                pass_message,
+                reasons: vec![e],
+                csv: String::new(),
+                report_text: String::new(),
+                combined_report: String::new(),
+                files_written,
+                log,
+            };
+        }
+    };
+
+    log.push(log_line(
+        "info",
+        format!("Evaluating {} document(s)…", inputs.len()),
+    ));
+
+    let mut reports = Vec::new();
+    let mut ok = true;
+    for input in &inputs {
+        match docx_core::evaluate_docx(input, &standards) {
+            Ok(report) => {
+                log.push(log_line(
+                    "info",
+                    format!(
+                        "ISO checklist {}: {} present, {} missing",
+                        input
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("document"),
+                        report.present_count(),
+                        report.missing_count()
+                    ),
+                ));
+                reports.push(report);
+            }
+            Err(e) => {
+                ok = false;
+                log.push(log_line(
+                    "error",
+                    format!("ISO checklist failed for {}: {e}", input.display()),
+                ));
+            }
+        }
+    }
+
+    if reports.is_empty() {
+        return IsoFirstResult {
+            ok: false,
+            passed: false,
+            standards_labels,
+            pass_message,
+            reasons: vec!["ISO checklist produced no findings (evaluation failed).".into()],
+            csv: String::new(),
+            report_text: String::new(),
+            combined_report: String::new(),
+            files_written,
+            log,
+        };
+    }
+
+    let merged = docx_core::merge_reports(reports);
+    let csv = merged.to_csv();
+    let report_text = merged.to_text_report();
+    let combined_report = combined_iso_print_report(&csv, &report_text);
+    let reasons = missing_reasons(&merged);
+    let passed = ok && reasons.is_empty();
+
+    if let Some(ref out) = req.output_dir {
+        let out = out.trim();
+        if !out.is_empty() {
+            let output_dir = PathBuf::from(out);
+            match docx_core::write_exports(&merged, &output_dir) {
+                Ok((csv_path, txt_path)) => {
+                    log.push(log_line("info", format!("Wrote {csv_path}")));
+                    log.push(log_line("info", format!("Wrote {txt_path}")));
+                    files_written.push(csv_path);
+                    files_written.push(txt_path);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(log_line(
+                        "error",
+                        format!("Failed to write ISO checklist exports: {e}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    if passed {
+        log.push(log_line("info", pass_message.clone()));
+    } else {
+        log.push(log_line(
+            "warn",
+            format!(
+                "ISO RUN FIRST failed: {} missing clause(s).",
+                reasons.len()
+            ),
+        ));
+    }
+
+    IsoFirstResult {
+        ok,
+        passed,
+        standards_labels,
+        pass_message,
+        reasons,
+        csv,
+        report_text,
+        combined_report,
+        files_written,
+        log,
+    }
+}
+
 fn log_line(level: &str, message: impl Into<String>) -> RunLogLine {
     RunLogLine {
         level: level.into(),
@@ -929,5 +1208,114 @@ mod tests {
         let pdf_path = out.join("sample.pdf");
         assert!(pdf_path.exists());
         assert!(pdf_path.metadata().unwrap().len() > 200);
+    }
+
+    #[test]
+    fn iso_run_first_fails_with_reasons_on_partial_doc() {
+        let dir = std::env::temp_dir().join("compliancy-iso-run-first-fail");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let input = fixture_docx(&dir);
+        let out = dir.join("out");
+
+        let result = run_iso_first(IsoFirstRequest {
+            input_paths: vec![input.display().to_string()],
+            standards: vec!["45001".into()],
+            output_dir: Some(out.display().to_string()),
+        });
+
+        assert!(result.ok, "{:?}", result.log);
+        assert!(!result.passed);
+        assert_eq!(result.standards_labels, vec!["ISO 45001".to_string()]);
+        assert_eq!(result.pass_message, "Compliancy passes: ISO 45001");
+        assert!(!result.reasons.is_empty());
+        assert!(result.reasons.iter().any(|r| r.contains("ISO 45001")));
+        assert!(result.csv.contains("document,standard,clause,title,status"));
+        assert!(result.report_text.contains("[MISS]") || result.report_text.contains("[PASS]"));
+        assert!(result.combined_report.contains("--- Text report ---"));
+        assert!(result.combined_report.contains("--- CSV ---"));
+        assert!(result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("iso-checklist.csv")));
+        assert!(result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("iso-checklist-report.txt")));
+        // No transformed document output — checklist only.
+        assert!(!result.files_written.iter().any(|p| p.ends_with(".docx")));
+    }
+
+    #[test]
+    fn iso_run_first_passes_when_all_clauses_present() {
+        let dir = std::env::temp_dir().join("compliancy-iso-run-first-pass");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Build a doc that hits every 45001 clause pattern via the clause id itself.
+        let clauses = docx_core::clauses_for(&[docx_core::IsoStandard::Iso45001]);
+        let mut paras: Vec<(&str, String)> = Vec::new();
+        for c in &clauses {
+            // Prefer a non-id pattern when available so ids don't false-match siblings.
+            let needle = c
+                .patterns
+                .iter()
+                .find(|p| p.chars().any(|ch| ch.is_ascii_alphabetic()))
+                .copied()
+                .unwrap_or(c.patterns[0]);
+            paras.push(("body", format!("{} {}", c.clause, needle)));
+        }
+        let owned: Vec<(&str, &str)> = paras
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect();
+        let path = dir.join("full-45001.docx");
+        write_minimal_docx(
+            &path,
+            "Heading1",
+            "Normal",
+            &owned,
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+
+        let result = run_iso_first(IsoFirstRequest {
+            input_paths: vec![path.display().to_string()],
+            standards: vec!["45001".into()],
+            output_dir: None,
+        });
+
+        assert!(result.ok, "{:?}", result.log);
+        assert!(result.passed, "reasons: {:?}", result.reasons);
+        assert!(result.reasons.is_empty());
+        assert_eq!(result.pass_message, "Compliancy passes: ISO 45001");
+        assert!(result.files_written.is_empty());
+    }
+
+    #[test]
+    fn iso_run_first_requires_standards_and_inputs() {
+        let no_std = run_iso_first(IsoFirstRequest {
+            input_paths: vec!["/tmp/does-not-matter.docx".into()],
+            standards: vec![],
+            output_dir: None,
+        });
+        assert!(!no_std.ok);
+        assert!(!no_std.passed);
+        assert!(no_std
+            .reasons
+            .iter()
+            .any(|r| r.contains("Select at least one ISO standard")));
+
+        let no_in = run_iso_first(IsoFirstRequest {
+            input_paths: vec![],
+            standards: vec!["9001".into()],
+            output_dir: None,
+        });
+        assert!(!no_in.ok);
+        assert!(no_in
+            .reasons
+            .iter()
+            .any(|r| r.contains("Choose input files")));
     }
 }

@@ -25,6 +25,22 @@ type RunResult = {
   };
 };
 
+type IsoFirstResult = {
+  ok: boolean;
+  passed: boolean;
+  standardsLabels: string[];
+  passMessage: string;
+  reasons: string[];
+  csv: string;
+  reportText: string;
+  combinedReport: string;
+  filesWritten: string[];
+  log: RunLogLine[];
+};
+
+let isoPrintReport = "";
+let passToastTimer: number | undefined;
+
 type DetectedTrait = {
   id: string;
   kind: "font" | "colour" | "background";
@@ -335,6 +351,109 @@ function selectedTraitIdsForRequest(): string[] | null {
   return state.selectedTraitIds;
 }
 
+function showPassToast(message: string) {
+  const toast = $("iso-pass-toast");
+  toast.hidden = false;
+  toast.textContent = message;
+  // Force reflow so the transition replays when shown again.
+  void toast.offsetWidth;
+  toast.classList.add("is-visible");
+  if (passToastTimer !== undefined) {
+    window.clearTimeout(passToastTimer);
+  }
+  passToastTimer = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+    window.setTimeout(() => {
+      toast.hidden = true;
+      toast.textContent = "";
+    }, 220);
+  }, 4500);
+}
+
+function showFailDialog(reasons: string[], combinedReport: string) {
+  isoPrintReport = combinedReport;
+  const list = $("iso-fail-reasons");
+  list.textContent = "";
+  for (const reason of reasons) {
+    const li = document.createElement("li");
+    li.textContent = reason;
+    list.appendChild(li);
+  }
+  $("iso-fail-summary").textContent =
+    reasons.length === 1
+      ? "1 missing clause from the ISO checklist:"
+      : `${reasons.length} missing clause(s) from the ISO checklist:`;
+  const dialog = $("iso-fail-dialog") as HTMLDialogElement;
+  if (typeof dialog.showModal === "function") {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute("open", "");
+  }
+}
+
+function printCombinedIsoReport() {
+  const existing = document.getElementById("iso-print-root");
+  if (existing) {
+    existing.remove();
+  }
+  const root = document.createElement("pre");
+  root.id = "iso-print-root";
+  root.textContent =
+    isoPrintReport || "No ISO RUN FIRST report available to print.";
+  document.body.appendChild(root);
+  window.print();
+  window.setTimeout(() => root.remove(), 500);
+}
+
+async function runIsoFirst() {
+  const btn = $("iso-run-first") as HTMLButtonElement;
+  btn.disabled = true;
+  try {
+    const standards = selectedIsoStandards();
+    if (standards.length === 0) {
+      appendLog("error", "Select at least one ISO standard before RUN FIRST.");
+      return;
+    }
+    if (state.inputPaths.length === 0) {
+      appendLog("error", "Choose input files or a folder before RUN FIRST.");
+      return;
+    }
+
+    const outputDir = ($("output-dir") as HTMLInputElement).value.trim();
+    const request = {
+      inputPaths: state.inputPaths,
+      standards,
+      outputDir: outputDir || null,
+    };
+
+    appendLog("info", "ISO RUN FIRST — checklist before pipeline…");
+    const result = await invoke<IsoFirstResult>("run_iso_first", { request });
+    for (const line of result.log) {
+      appendLog(line.level, line.message);
+    }
+
+    if (result.passed) {
+      showPassToast(result.passMessage);
+      appendLog("info", result.passMessage);
+      return;
+    }
+
+    const reasons =
+      result.reasons.length > 0
+        ? result.reasons
+        : ["ISO checklist failed (see run log)."];
+    showFailDialog(reasons, result.combinedReport);
+    appendLog(
+      "warn",
+      `ISO RUN FIRST failed with ${reasons.length} reason(s).`,
+    );
+  } catch (err) {
+    appendLog("error", String(err));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function runPipeline() {
   const btn = $("run-btn") as HTMLButtonElement;
   btn.disabled = true;
@@ -395,6 +514,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("pick-folder").addEventListener("click", () => void pickFolder());
   $("pick-output").addEventListener("click", () => void pickOutput());
   $("run-btn").addEventListener("click", () => void runPipeline());
+  $("iso-run-first").addEventListener("click", () => void runIsoFirst());
+  $("iso-fail-print").addEventListener("click", () => printCombinedIsoReport());
   $("clear-log").addEventListener("click", () => {
     $("log").textContent = "";
   });
