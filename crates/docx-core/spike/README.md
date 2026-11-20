@@ -8,7 +8,7 @@ Also runs the **ISO section presence checklist** and **structured context rules*
 
 1. Opens both packages as ZIP (Office Open XML).
 2. Starts from the **template** package (styles, theme, media, section properties, relationships).
-3. Keeps document `w:background` and **leading behind-doc** body chrome (`behindDoc="1"` only — not template inline photos).
+3. Keeps document `w:background` (or synthesises one from theme accent2) and injects **leading behind-doc** DrawingML into the first source paragraph, page-pinned (`behindDoc="1"` only — not template inline photos, never a spacer paragraph).
 4. Replaces the remaining template body (except trailing `w:sectPr`) with the source body paragraphs.
 5. Strips source **presentation** direct formatting (`w:color`, fonts, sizes, …) so template **per-style** colours apply — Heading styles keep their own colours; Normal/body uses the body colour (not one flattened global colour).
 6. Writes `styled-output.docx`.

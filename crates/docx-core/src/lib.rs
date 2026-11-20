@@ -74,7 +74,7 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
 
     let source_inner = extract_body_inner(&source_document)?;
     let source_inner = strip_presentation_overrides(&source_inner);
-    let merged_document = splice_body_content(&template_document, &source_inner)?;
+    let mut merged_document = splice_body_content(&template_document, &source_inner)?;
 
     let mut parts: HashMap<String, Vec<u8>> = HashMap::new();
     for i in 0..template_zip.len() {
@@ -86,6 +86,11 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         parts.insert(name, data);
+    }
+
+    // Belt-and-braces page fill from theme accent2 when document has no w:background.
+    if let Some(fill) = theme_accent2_hex(&parts) {
+        merged_document = ensure_document_background(&merged_document, &fill);
     }
     parts.insert(DOCUMENT_PATH.to_string(), merged_document.into_bytes());
 
@@ -140,11 +145,12 @@ fn extract_body_inner(document_xml: &str) -> Result<String> {
     Ok(inner.trim().to_string())
 }
 
-/// Replace template body content (except trailing sectPr + chrome) with `source_inner`.
+/// Replace template body content (except trailing sectPr) with `source_inner`.
 ///
-/// Preserves template `w:background` (outside `w:body`) via the document prefix, and
-/// re-injects **leading behind-doc** body chrome so page fills stay behind text without
-/// pulling in template inline photos (which would sit in-flow and push content down).
+/// Preserves template `w:background` via the document prefix. Leading behind-doc DrawingML
+/// runs are **injected into the first source paragraph** (page-pinned, `behindDoc=1`) so they
+/// cannot sit in a spacer paragraph that pushes text down. Template `wp:inline` photos are
+/// never treated as chrome.
 fn splice_body_content(template_document: &str, source_inner: &str) -> Result<String> {
     let body_open = find_tag_end(template_document, "w:body")
         .ok_or_else(|| DocxError::Message("template missing <w:body>".into()))?;
@@ -166,39 +172,33 @@ fn splice_body_content(template_document: &str, source_inner: &str) -> Result<St
         }
     }
 
-    let chrome = extract_template_chrome(&inner_wo_sect);
+    let chrome_runs = extract_leading_behind_doc_runs(&inner_wo_sect);
+    let chrome_runs = pin_anchors_behind_page(&chrome_runs);
+    let body_with_chrome = inject_runs_into_first_paragraph(source_inner, &chrome_runs);
 
     let mut new_inner = String::new();
     new_inner.push('\n');
-    if !chrome.is_empty() {
-        new_inner.push_str(&chrome);
-        new_inner.push('\n');
-    }
-    new_inner.push_str(source_inner);
+    new_inner.push_str(&body_with_chrome);
     new_inner.push('\n');
     if !sect_pr.is_empty() {
         new_inner.push_str(&sect_pr);
         new_inner.push('\n');
     }
 
-    let mut out = String::with_capacity(template_document.len() + source_inner.len() + chrome.len());
+    let mut out =
+        String::with_capacity(template_document.len() + body_with_chrome.len() + chrome_runs.len());
     out.push_str(&template_document[..body_open]);
     out.push_str(&new_inner);
     out.push_str(&template_document[body_close..]);
     Ok(out)
 }
 
-/// Leading page-background chrome from the template body.
+/// Runs from leading behind-doc chrome paragraphs (until first meaningful text).
 ///
-/// Word stores branded page fills as `wp:anchor behindDoc="1"` (DrawingML) and/or VML
-/// picts with negative `z-index` — often in the first body paragraph(s), **before** real
-/// text. Mid-document inline photos (`wp:inline`) are template *content*, not chrome:
-/// prepending them puts images in front of / above the merged body and shifts text down.
-///
-/// We only keep behind-doc anchors from the **prefix** (until the first meaningful text
-/// paragraph), and normalize paragraph spacing so chrome does not add vertical gap.
-fn extract_template_chrome(template_body_inner: &str) -> String {
-    let mut chrome = String::new();
+/// Skips `wp:inline` content photos. Returns raw `<w:r>…</w:r>` fragments to inject into
+/// the first merged content paragraph — never a standalone empty chrome paragraph.
+fn extract_leading_behind_doc_runs(template_body_inner: &str) -> String {
+    let mut runs_out = String::new();
     let mut rest = template_body_inner;
     while let Some(start) = find_next_open_tag(rest, "w:p") {
         let from = &rest[start..];
@@ -207,16 +207,28 @@ fn extract_template_chrome(template_body_inner: &str) -> String {
         };
         let para = &from[..end];
         if paragraph_has_meaningful_text(para) {
-            // End of leading chrome — do not pull mid-doc section backgrounds or photos.
             break;
         }
         if is_behind_doc_chrome(para) {
-            chrome.push_str(&normalize_chrome_paragraph(para));
-            chrome.push('\n');
+            let mut para_rest = para;
+            while let Some(r_start) = find_next_open_tag(para_rest, "w:r") {
+                let r_from = &para_rest[r_start..];
+                let Some(r_end) = find_element_end(r_from, "w:r") else {
+                    break;
+                };
+                let run = &r_from[..r_end];
+                if run.contains("<w:drawing>")
+                    || run.contains("<w:pict>")
+                    || run.contains("AlternateContent")
+                {
+                    runs_out.push_str(run);
+                }
+                para_rest = &r_from[r_end..];
+            }
         }
         rest = &from[end..];
     }
-    chrome
+    runs_out
 }
 
 /// True only for floating anchors marked behind the document (not inline drawings).
@@ -249,72 +261,201 @@ fn paragraph_has_meaningful_text(para: &str) -> bool {
     false
 }
 
-/// Zero out paragraph spacing on chrome so behind-doc anchors do not displace body text.
-fn normalize_chrome_paragraph(para: &str) -> String {
-    let spacing =
-        r#"<w:spacing w:before="0" w:after="0" w:line="0" w:lineRule="auto"/>"#;
-    if let Some(ppr_start) = find_next_open_tag(para, "w:pPr") {
-        let from = &para[ppr_start..];
-        if let Some(ppr_end) = find_element_end(from, "w:pPr") {
-            let ppr = &from[..ppr_end];
-            let first_gt = match ppr.find('>') {
-                Some(i) => i,
-                None => return para.to_string(),
-            };
-            let mut inner = if ppr.as_bytes().get(first_gt.saturating_sub(1)) == Some(&b'/') {
-                String::new()
-            } else {
-                ppr[first_gt + 1..ppr.len() - "</w:pPr>".len()].to_string()
-            };
-            // Drop existing spacing children, then force zero spacing.
-            inner = strip_named_children(&inner, &["w:spacing"]);
-            let new_ppr = format!("<w:pPr>{spacing}{inner}</w:pPr>");
-            return format!(
-                "{}{}{}",
-                &para[..ppr_start],
-                new_ppr,
-                &from[ppr_end..]
-            );
-        }
+/// Force DrawingML anchors behind the page so they do not participate in paragraph flow.
+fn pin_anchors_behind_page(chrome_runs: &str) -> String {
+    if chrome_runs.is_empty() {
+        return String::new();
     }
-    // No pPr — insert one after the opening <w:p …>.
-    if let Some(gt) = para.find('>') {
-        return format!(
-            "{}<w:pPr>{spacing}</w:pPr>{}",
-            &para[..=gt],
-            &para[gt + 1..]
-        );
-    }
-    para.to_string()
+    let mut out = chrome_runs.to_string();
+
+    // Ensure behindDoc on every floating anchor.
+    out = out.replace("behindDoc=\"0\"", "behindDoc=\"1\"");
+    // Insert behindDoc="1" on anchors that lack the attribute.
+    out = ensure_anchor_attr(&out, "behindDoc", "1");
+
+    // Page-relative placement (not paragraph/column — those leave a spacer para effect
+    // when the anchor lived in its own empty paragraph before content).
+    out = rewrite_position_relative_from(&out, "page");
+
+    // Prefer wrapNone so the shape never reserves layout space.
+    out = out.replace("<wp:wrapTopAndBottom/>", "<wp:wrapNone/>");
+    out = out.replace("<wp:wrapSquare/>", "<wp:wrapNone/>");
+    out = out.replace("<wp:wrapThrough/>", "<wp:wrapNone/>");
+
+    // VML fallback: keep negative z-index; prefer page-relative hints when present.
+    out = out.replace(
+        "mso-position-horizontal-relative:text",
+        "mso-position-horizontal-relative:page",
+    );
+    out = out.replace(
+        "mso-position-vertical-relative:text",
+        "mso-position-vertical-relative:page",
+    );
+    out = out.replace(
+        "mso-position-horizontal-relative:char",
+        "mso-position-horizontal-relative:page",
+    );
+    out = out.replace(
+        "mso-position-vertical-relative:line",
+        "mso-position-vertical-relative:page",
+    );
+
+    out
 }
 
-fn strip_named_children(inner: &str, names: &[&str]) -> String {
-    let mut out = String::with_capacity(inner.len());
-    let mut rest = inner;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        let from = &rest[lt..];
-        if from.starts_with("</") {
-            out.push('<');
-            rest = &from[1..];
-            continue;
+fn ensure_anchor_attr(xml: &str, attr: &str, value: &str) -> String {
+    let mut out = String::with_capacity(xml.len() + 64);
+    let mut rest = xml;
+    let needle = "<wp:anchor";
+    while let Some(at) = rest.find(needle) {
+        out.push_str(&rest[..at]);
+        let from = &rest[at..];
+        let Some(gt) = from.find('>') else {
+            out.push_str(from);
+            return out;
+        };
+        let open = &from[..=gt];
+        if open.contains(&format!("{attr}=")) {
+            out.push_str(open);
+        } else {
+            // Insert before closing `>` or `/>`
+            let insert_at = if open.ends_with("/>") {
+                open.len() - 2
+            } else {
+                open.len() - 1
+            };
+            out.push_str(&open[..insert_at]);
+            out.push(' ');
+            out.push_str(attr);
+            out.push_str("=\"");
+            out.push_str(value);
+            out.push('"');
+            out.push_str(&open[insert_at..]);
         }
-        let name_end = from[1..]
-            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let name = &from[1..name_end];
-        if names.iter().any(|s| *s == name) {
-            if let Some(end) = find_element_end(from, name) {
-                rest = &from[end..];
-                continue;
-            }
-        }
-        out.push('<');
-        rest = &from[1..];
+        rest = &from[gt + 1..];
     }
     out.push_str(rest);
     out
+}
+
+fn rewrite_position_relative_from(xml: &str, relative: &str) -> String {
+    let mut out = xml.to_string();
+    for tag in ["wp:positionH", "wp:positionV"] {
+        // Replace relativeFrom="…" inside these elements' opening tags.
+        let open = format!("<{tag}");
+        let mut rebuilt = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(at) = rest.find(&open) {
+            rebuilt.push_str(&rest[..at]);
+            let from = &rest[at..];
+            let Some(gt) = from.find('>') else {
+                rebuilt.push_str(from);
+                out = rebuilt;
+                return out;
+            };
+            let mut open_tag = from[..=gt].to_string();
+            if let Some(rf) = open_tag.find("relativeFrom=\"") {
+                let val_start = rf + "relativeFrom=\"".len();
+                if let Some(val_end) = open_tag[val_start..].find('"') {
+                    let end = val_start + val_end;
+                    open_tag.replace_range(val_start..end, relative);
+                }
+            } else {
+                let insert_at = open_tag.len() - 1;
+                open_tag.insert_str(insert_at, &format!(" relativeFrom=\"{relative}\""));
+            }
+            rebuilt.push_str(&open_tag);
+            rest = &from[gt + 1..];
+        }
+        rebuilt.push_str(rest);
+        out = rebuilt;
+    }
+    // Zero page offsets so the fill starts at the page origin.
+    out = replace_pos_offset_in_positions(&out);
+    out
+}
+
+fn replace_pos_offset_in_positions(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(at) = rest.find("<wp:posOffset>") {
+        out.push_str(&rest[..at]);
+        let from = &rest[at..];
+        if let Some(end) = from.find("</wp:posOffset>") {
+            out.push_str("<wp:posOffset>0</wp:posOffset>");
+            rest = &from[end + "</wp:posOffset>".len()..];
+        } else {
+            out.push_str(from);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Insert `<w:background w:color="…"/>` before `<w:body>` when missing.
+fn ensure_document_background(document_xml: &str, color_hex: &str) -> String {
+    if document_xml.contains("<w:background") {
+        return document_xml.to_string();
+    }
+    let color = color_hex.trim_start_matches('#').to_uppercase();
+    if let Some(at) = document_xml.find("<w:body") {
+        return format!(
+            "{}<w:background w:color=\"{color}\"/>{}",
+            &document_xml[..at],
+            &document_xml[at..]
+        );
+    }
+    document_xml.to_string()
+}
+
+fn theme_accent2_hex(parts: &HashMap<String, Vec<u8>>) -> Option<String> {
+    for (name, data) in parts {
+        if !(name.starts_with("word/theme/") && name.ends_with(".xml")) {
+            continue;
+        }
+        let Ok(theme) = std::str::from_utf8(data) else {
+            continue;
+        };
+        if let Some(block_start) = theme.find("<a:accent2>") {
+            let block = &theme[block_start..];
+            if let Some(end) = block.find("</a:accent2>") {
+                let inner = &block[..end];
+                if let Some(val_at) = inner.find("val=\"") {
+                    let v = &inner[val_at + 5..];
+                    if let Some(q) = v.find('"') {
+                        return Some(v[..q].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Insert chrome runs after the first paragraph's `w:pPr` (or at start of the para body).
+fn inject_runs_into_first_paragraph(body: &str, runs: &str) -> String {
+    if runs.is_empty() {
+        return body.to_string();
+    }
+    if let Some(start) = find_next_open_tag(body, "w:p") {
+        let from = &body[start..];
+        if let Some(end) = find_element_end(from, "w:p") {
+            let para = &from[..end];
+            let insert_at = if let Some(ppr_rel) = find_next_open_tag(para, "w:pPr") {
+                let ppr_from = &para[ppr_rel..];
+                match find_element_end(ppr_from, "w:pPr") {
+                    Some(ppr_end) => ppr_rel + ppr_end,
+                    None => para.find('>').map(|i| i + 1).unwrap_or(0),
+                }
+            } else {
+                para.find('>').map(|i| i + 1).unwrap_or(0)
+            };
+            let new_para = format!("{}{}{}", &para[..insert_at], runs, &para[insert_at..]);
+            return format!("{}{}{}", &body[..start], new_para, &from[end..]);
+        }
+    }
+    format!("<w:p>{runs}</w:p>\n{body}")
 }
 
 /// Remove presentation direct-formatting that would override template style colours/fonts.
@@ -829,8 +970,8 @@ mod tests {
         assert!(document.contains("Body stays navy via style"));
         // Direct black from source must not remain on runs/paragraph marks.
         assert!(
-            !document.contains("w:color"),
-            "source direct w:color should be stripped; colours come from template styles"
+            !document.contains("<w:color"),
+            "source direct <w:color> should be stripped; colours come from template styles"
         );
         assert!(!document.contains("Times New Roman"));
         // Distinct per-style colours remain in the template styles part (not flattened).
@@ -885,10 +1026,14 @@ mod tests {
             document.contains("r:embed=") || document.contains("a:blip"),
             "background image relationship/blip must survive"
         );
-        // Slim fixture chrome is behindDoc-only (no template inline photos prepended).
         assert!(
             !document.contains("<wp:inline"),
             "template inline photos must not be prepended as chrome (pushes text / sits in front)"
+        );
+        // Chrome is injected into the first text paragraph (no leading spacer).
+        assert!(
+            document.contains("relativeFrom=\"page\""),
+            "behind-doc chrome must be page-pinned"
         );
         assert!(
             names.iter().any(|k| k.starts_with("word/media/")),
@@ -929,38 +1074,54 @@ mod tests {
     }
 
     #[test]
-    fn chrome_keeps_leading_behind_doc_skips_inline_and_mid_doc() {
+    fn chrome_runs_skip_inline_and_mid_doc_and_pin_to_page() {
         let body = r#"
-<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:drawing><wp:anchor behindDoc="1" relativeHeight="1"><wp:wrapNone/></wp:anchor></w:drawing></w:r></w:p>
+<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:drawing><wp:anchor behindDoc="1" relativeHeight="1"><wp:positionH relativeFrom="column"><wp:posOffset>-10</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>-20</wp:posOffset></wp:positionV><wp:wrapNone/></wp:anchor></w:drawing></w:r></w:p>
 <w:p><w:r><w:drawing><wp:inline><wp:extent cx="1" cy="1"/></wp:inline></w:drawing></w:r></w:p>
 <w:p><w:r><w:t>Who we are</w:t></w:r></w:p>
 <w:p><w:r><w:drawing><wp:anchor behindDoc="1" relativeHeight="2"><wp:wrapNone/></wp:anchor></w:drawing></w:r></w:p>
 "#;
-        let chrome = extract_template_chrome(body);
-        assert!(chrome.contains("behindDoc=\"1\""));
-        assert!(chrome.contains("relativeHeight=\"1\""));
+        let runs = extract_leading_behind_doc_runs(body);
+        assert!(runs.contains("behindDoc=\"1\""));
+        assert!(runs.contains("relativeHeight=\"1\""));
+        assert!(!runs.contains("<wp:inline"), "inline photos are not chrome");
         assert!(
-            !chrome.contains("<wp:inline"),
-            "inline photos are not chrome"
+            !runs.contains("relativeHeight=\"2\""),
+            "mid-doc behindDoc after text must not be taken"
         );
-        assert!(
-            !chrome.contains("relativeHeight=\"2\""),
-            "mid-doc behindDoc after text must not be prepended"
+        assert!(!runs.contains("Who we are"));
+        assert!(!runs.contains("<w:p"), "chrome must be runs, not a spacer paragraph");
+
+        let pinned = pin_anchors_behind_page(&runs);
+        assert!(pinned.contains("relativeFrom=\"page\""));
+        assert!(!pinned.contains("relativeFrom=\"paragraph\""));
+        assert!(!pinned.contains("relativeFrom=\"column\""));
+        assert!(pinned.contains("<wp:posOffset>0</wp:posOffset>"));
+
+        let injected = inject_runs_into_first_paragraph(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+            &pinned,
         );
-        assert!(
-            chrome.contains(r#"w:spacing w:before="0""#),
-            "chrome spacing normalized to avoid pushing text down"
-        );
-        assert!(!chrome.contains("Who we are"));
+        assert!(injected.contains("behindDoc=\"1\""));
+        assert!(injected.contains(">Title<"));
+        // Single paragraph: chrome + text together (no leading empty para).
+        let mut para_count = 0;
+        let mut rest = injected.as_str();
+        while let Some(start) = find_next_open_tag(rest, "w:p") {
+            para_count += 1;
+            let from = &rest[start..];
+            let end = find_element_end(from, "w:p").unwrap();
+            rest = &from[end..];
+        }
+        assert_eq!(para_count, 1);
     }
 
     #[test]
-    fn transform_full_master_does_not_prepend_inline_photos() {
+    fn transform_full_master_injects_behind_doc_into_first_text_para() {
         let master = PathBuf::from(
             "/cursor/stores/bc-dcb61577-a4fb-44e3-9ea5-6fcaadf23034/internal/fixtures/master-template-example.docx",
         );
         if !master.exists() || master.metadata().map(|m| m.len()).unwrap_or(0) < 1_000_000 {
-            // Store copy of Beau's full master not available in this environment.
             return;
         }
 
@@ -992,7 +1153,11 @@ mod tests {
             !document.contains("<wp:inline"),
             "must not prepend template inline photos"
         );
-        // First text should appear early — not after a stack of photo paragraphs.
+        assert!(
+            document.contains("<w:background"),
+            "theme accent2 should become w:background fill"
+        );
+
         let paras: Vec<&str> = {
             let mut v = Vec::new();
             let mut rest = document.as_str();
@@ -1006,19 +1171,19 @@ mod tests {
             }
             v
         };
-        let first_text = paras.iter().position(|p| paragraph_has_meaningful_text(p));
         assert!(
-            matches!(first_text, Some(i) if i <= 2),
-            "text should follow leading behind-doc chrome only, got first_text={first_text:?}"
+            !paras.is_empty()
+                && paras[0].contains("behindDoc=\"1\"")
+                && paragraph_has_meaningful_text(paras[0]),
+            "first paragraph must carry behind-doc chrome AND the first text (no spacer para)"
         );
-        let behind_before_text = paras
-            .iter()
-            .take(first_text.unwrap_or(0))
-            .filter(|p| p.contains("behindDoc=\"1\""))
-            .count();
+        assert!(
+            paras[0].contains("relativeFrom=\"page\""),
+            "chrome must be page-pinned"
+        );
         assert_eq!(
-            behind_before_text, 1,
-            "only the leading page background behindDoc should be prepended"
+            paras.iter().filter(|p| p.contains("behindDoc=\"1\"")).count(),
+            1
         );
     }
 }
