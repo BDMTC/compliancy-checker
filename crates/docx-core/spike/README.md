@@ -1,17 +1,19 @@
 # `.docx` transform spike + ISO checklist + context rules CLI
 
-Proves the hard part of Compliancy Checker v1: take a **source** Word document and a **master template**, write an **output** `.docx` whose factual body text comes from the source while fonts/colours/style definitions come from the template’s Open XML package (`styles.xml`, theme, etc.).
+Proves the hard part of Compliancy Checker v1: take a **source** Word document and a **master template**, write an **output** `.docx` whose factual body text comes from the source while fonts/colours/style definitions **and** page background chrome come from the template’s Open XML package (`styles.xml` / `styles2.xml`, theme, media, `w:background`, behind-doc DrawingML).
 
 Also runs the **ISO section presence checklist** and **structured context rules** offline (no GUI / no network / no LLM).
 
 ## What the transform does
 
 1. Opens both packages as ZIP (Office Open XML).
-2. Starts from the **template** package (styles, theme, section properties).
-3. Replaces the template body (except trailing `w:sectPr`) with the source body paragraphs.
-4. Writes `styled-output.docx`.
+2. Starts from the **template** package (styles, theme, media, section properties, relationships).
+3. Keeps document `w:background` (or synthesises one from theme accent2) and injects **leading behind-doc** DrawingML into the first source paragraph, page-pinned (`behindDoc="1"` only — not template inline photos, never a spacer paragraph).
+4. Replaces the remaining template body (except trailing `w:sectPr`) with the source body paragraphs.
+5. Strips source **presentation** direct formatting (`w:color`, fonts, sizes, …) so template **per-style** colours apply — Heading styles keep their own colours; Normal/body uses the body colour (not one flattened global colour).
+6. Writes `styled-output.docx`.
 
-Style IDs on source paragraphs (`Heading1`, `Normal`, …) resolve against the template’s `styles.xml`.
+Style IDs on source paragraphs (`Heading1`, `Normal`, …) resolve against the template’s styles part.
 
 ## Prerequisites
 
@@ -94,6 +96,7 @@ In the desktop app (Standard mode), enabling **Context rules** applies the same 
 |---|---|
 | `fixtures/sample-input.docx` | Times New Roman / black; holds customer address & inspection facts |
 | `fixtures/master-template.docx` | Calibri; heading colour `#C45911`; body colour `#1F4E79` |
+| `fixtures/master-template-example.docx` | Slimmed from Beau’s real Word master — `styles2.xml` + theme colours, `w:background`, behind-doc DrawingML + media |
 | `fixtures/iso-45001-partial.docx` | Partial OH&S manual headings for checklist tests |
 | `fixtures/context-rules.example.txt` | Sample line-based context rules for CLI / UI paste |
 | `out/styled-output.docx` | Generated — facts from sample, styles from template |
@@ -113,15 +116,19 @@ Covers style merge, text extraction, ISO present/missing + export round-trip, an
 **Proved**
 
 - Content preservation across style merge for paragraph text.
-- Template `styles.xml` (fonts/colours) retained in the output package.
+- Template styles + theme (fonts/colours) retained; **per-style** colours (Heading vs Normal), not a single global colour.
+- Source direct colour/font/size overrides stripped so template style colours win.
+- Template `w:background` + behind-doc DrawingML chrome + media relationships survive merge.
 - ISO 9001 / 14001 / 45001 section presence checklist + CSV/report export.
 - Structured context rules (force heading, replace, require section/heading) + CSV/report export.
 - Runnable without the Tauri GUI / without network.
 
 **Still TODO**
 
-- Headers/footers, numbering, complex runs (bold mid-sentence), tables, images.
+- Headers/footers (when not already on the template package), numbering, tables, inline content images from the source.
+- Mid-document behind-doc section backgrounds (only the leading page chrome is kept today).
 - Style-ID remapping when source custom styles don’t exist on the template.
+- UI: after master template load, preview + picker of detected style traits (colours, backgrounds, fonts) to apply all / one / a subset.
 - Required-section / field validation from the master template.
 - Cross-run find/replace (Word often splits text across `w:t` nodes).
 - Assist LLM gap narrative / freeform context.
