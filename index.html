@@ -54,20 +54,6 @@
           <p class="note">Section/clause presence check against ingested .docx text. Exports <code>iso-checklist.csv</code> and <code>iso-checklist-report.txt</code> beside processed docs. Not an accreditation decision.</p>
         </section>
 
-        <div id="iso-pass-toast" class="iso-pass-toast" role="status" aria-live="polite" hidden></div>
-
-        <dialog id="iso-fail-dialog" class="iso-fail-dialog">
-          <form method="dialog" class="iso-fail-form">
-            <h2 id="iso-fail-title">Compliancy check failed</h2>
-            <p class="note" id="iso-fail-summary">Missing clause(s) from the ISO checklist:</p>
-            <ul id="iso-fail-reasons" class="iso-fail-reasons"></ul>
-            <div class="iso-fail-actions">
-              <button type="submit" class="btn secondary" value="ok" id="iso-fail-ok">OK</button>
-              <button type="button" class="btn primary" id="iso-fail-print">Print</button>
-            </div>
-          </form>
-        </dialog>
-
         <section class="panel" aria-labelledby="template-heading">
           <div class="panel-head">
             <label class="check">
@@ -106,7 +92,7 @@
           </div>
           <textarea
             id="context-text"
-            rows="6"
+            rows="4"
             placeholder="# Line rules (or paste JSON { &quot;rules&quot;: [...] })
 force_heading: Revision History
 require_section: Document Control
@@ -141,7 +127,7 @@ replace: Acme Works Ltd => ACME Works Limited
         <section class="panel assist-panel is-hidden" id="assist-panel" aria-labelledby="assist-heading">
           <div class="panel-head">
             <h2 id="assist-heading">Assist API</h2>
-            <span class="hint">Optional · OpenAI-compatible</span>
+            <span class="hint">Optional · ISO gap + freeform context</span>
           </div>
           <div class="assist-grid">
             <label>
@@ -167,7 +153,6 @@ replace: Acme Works Ltd => ACME Works Limited
               <input type="password" id="assist-api-key" placeholder="Session only — or COMPLIANCY_ASSIST_API_KEY / assist.json" autocomplete="off" />
             </label>
           </div>
-          <p class="note">Used for ISO gap narrative and freeform context interpretation. Standard mode never calls the network. See README Assist section.</p>
           <p class="note" id="assist-status">Standard mode stays offline.</p>
         </section>
 
@@ -184,6 +169,20 @@ replace: Acme Works Ltd => ACME Works Limited
           <pre id="log" class="log" aria-live="polite"></pre>
         </section>
       </main>
+
+      <div id="iso-pass-toast" class="iso-pass-toast" role="status" aria-live="polite" hidden></div>
+
+      <dialog id="iso-fail-dialog" class="iso-fail-dialog">
+        <form method="dialog" class="iso-fail-form">
+          <h2 id="iso-fail-title">Compliancy check failed</h2>
+          <p class="note" id="iso-fail-summary">Missing clause(s) from the ISO checklist:</p>
+          <ul id="iso-fail-reasons" class="iso-fail-reasons"></ul>
+          <div class="iso-fail-actions">
+            <button type="submit" class="btn secondary" value="ok" id="iso-fail-ok">OK</button>
+            <button type="button" class="btn primary" id="iso-fail-print">Print</button>
+          </div>
+        </form>
+      </dialog>
     </div>
   </body>
 </html>
