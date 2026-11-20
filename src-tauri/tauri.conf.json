@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Compliancy Checker",
+        "title": "Compliancy Checker · Alpha 1",
         "width": 1040,
         "height": 820,
         "minWidth": 860,
