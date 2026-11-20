@@ -47,11 +47,24 @@
               <input type="checkbox" id="template-enabled" checked />
               <span id="template-heading">Master template</span>
             </label>
-            <span class="hint">Fonts · colours · structure</span>
+            <span class="hint">Preview · pick traits · then apply</span>
           </div>
-          <div class="field-row">
+          <div class="field-row field-row-template">
             <input type="text" id="template-path" readonly placeholder="Choose a master .docx template…" />
             <button type="button" class="btn secondary" id="pick-template">Browse</button>
+          </div>
+          <div id="template-preview" class="template-preview is-empty" hidden>
+            <div class="template-preview-head">
+              <p class="template-preview-title" id="template-preview-title">Template preview</p>
+              <div class="template-preview-actions">
+                <button type="button" class="btn ghost" id="traits-select-all">Select all</button>
+                <button type="button" class="btn ghost" id="traits-select-none">Select none</button>
+              </div>
+            </div>
+            <div class="template-swatches" id="template-swatches" aria-label="Detected colours"></div>
+            <p class="template-preview-meta" id="template-preview-meta"></p>
+            <div class="trait-list" id="trait-list" role="group" aria-label="Detected template traits"></div>
+            <p class="note">Detected fonts, colours, and backgrounds. Select all, one, or any subset — only checked traits are applied on merge. PDF ingest/export is later (CC-11).</p>
           </div>
         </section>
 

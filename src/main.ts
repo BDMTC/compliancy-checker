@@ -25,9 +25,34 @@ type RunResult = {
   };
 };
 
+type DetectedTrait = {
+  id: string;
+  kind: "font" | "colour" | "background";
+  label: string;
+  value: string;
+  styleId?: string | null;
+  swatch?: string | null;
+};
+
+type TemplatePreview = {
+  path: string;
+  fileName: string;
+  traits: DetectedTrait[];
+  summary: {
+    fonts: string[];
+    colours: string[];
+    backgroundFill?: string | null;
+    hasBackgroundChrome: boolean;
+    styleCount: number;
+  };
+};
+
 const state = {
   mode: "standard" as Mode,
   inputPaths: [] as string[],
+  templatePreview: null as TemplatePreview | null,
+  /** When non-null, only these trait ids are applied. Null means “all”. */
+  selectedTraitIds: null as string[] | null,
 };
 
 const $ = <T extends HTMLElement>(id: string) =>
@@ -86,6 +111,141 @@ function syncInputPathsDisplay() {
   el.value = state.inputPaths.join("; ");
 }
 
+function kindLabel(kind: DetectedTrait["kind"]): string {
+  switch (kind) {
+    case "font":
+      return "Fonts";
+    case "colour":
+      return "Colours";
+    case "background":
+      return "Backgrounds";
+  }
+}
+
+function renderTemplatePreview(preview: TemplatePreview | null) {
+  const panel = $("template-preview");
+  if (!preview || preview.traits.length === 0) {
+    state.templatePreview = null;
+    state.selectedTraitIds = null;
+    panel.hidden = true;
+    panel.classList.add("is-empty");
+    $("trait-list").textContent = "";
+    $("template-swatches").textContent = "";
+    $("template-preview-meta").textContent = "";
+    return;
+  }
+
+  state.templatePreview = preview;
+  // Default: all traits selected.
+  state.selectedTraitIds = preview.traits.map((t) => t.id);
+
+  panel.hidden = false;
+  panel.classList.remove("is-empty");
+  $("template-preview-title").textContent = preview.fileName;
+
+  const swatches = $("template-swatches");
+  swatches.textContent = "";
+  const seen = new Set<string>();
+  for (const t of preview.traits) {
+    const hex = t.swatch?.toUpperCase();
+    if (!hex || seen.has(hex)) continue;
+    seen.add(hex);
+    const chip = document.createElement("span");
+    chip.className = "swatch";
+    chip.style.setProperty("--swatch", `#${hex}`);
+    chip.title = `#${hex}`;
+    chip.setAttribute("aria-label", `Colour #${hex}`);
+    swatches.appendChild(chip);
+  }
+
+  const fonts = preview.summary.fonts.slice(0, 4).join(", ") || "—";
+  const chrome = preview.summary.hasBackgroundChrome
+    ? "behind-doc chrome"
+    : "no chrome";
+  const fill = preview.summary.backgroundFill
+    ? `#${preview.summary.backgroundFill}`
+    : "no page fill";
+  $("template-preview-meta").textContent =
+    `${preview.traits.length} trait(s) · ${preview.summary.styleCount} style(s) · fonts: ${fonts} · ${fill} · ${chrome}`;
+
+  const list = $("trait-list");
+  list.textContent = "";
+
+  const order: DetectedTrait["kind"][] = ["background", "font", "colour"];
+  for (const kind of order) {
+    const groupTraits = preview.traits.filter((t) => t.kind === kind);
+    if (groupTraits.length === 0) continue;
+
+    const group = document.createElement("div");
+    group.className = "trait-group";
+    const heading = document.createElement("p");
+    heading.className = "trait-group-label";
+    heading.textContent = kindLabel(kind);
+    group.appendChild(heading);
+
+    for (const trait of groupTraits) {
+      const label = document.createElement("label");
+      label.className = "trait-item";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = trait.id;
+      input.checked = true;
+      input.addEventListener("change", syncTraitSelectionFromDom);
+      const text = document.createElement("span");
+      text.className = "trait-text";
+      text.textContent = `${trait.label}: ${trait.value}`;
+      label.appendChild(input);
+      if (trait.swatch) {
+        const dot = document.createElement("span");
+        dot.className = "swatch swatch-sm";
+        dot.style.setProperty("--swatch", `#${trait.swatch}`);
+        label.appendChild(dot);
+      }
+      label.appendChild(text);
+      group.appendChild(label);
+    }
+    list.appendChild(group);
+  }
+}
+
+function syncTraitSelectionFromDom() {
+  if (!state.templatePreview) {
+    state.selectedTraitIds = null;
+    return;
+  }
+  const boxes = document.querySelectorAll<HTMLInputElement>(
+    "#trait-list input[type=checkbox]",
+  );
+  state.selectedTraitIds = Array.from(boxes)
+    .filter((b) => b.checked)
+    .map((b) => b.value);
+}
+
+function setAllTraits(checked: boolean) {
+  const boxes = document.querySelectorAll<HTMLInputElement>(
+    "#trait-list input[type=checkbox]",
+  );
+  for (const box of boxes) {
+    box.checked = checked;
+  }
+  syncTraitSelectionFromDom();
+}
+
+async function loadTemplatePreview(path: string) {
+  try {
+    appendLog("info", `Inspecting template traits: ${path}`);
+    const preview = await invoke<TemplatePreview>("inspect_template", { path });
+    renderTemplatePreview(preview);
+    appendLog(
+      "info",
+      `Detected ${preview.traits.length} trait(s) in ${preview.fileName} — select all, one, or a subset before Run.`,
+    );
+  } catch (err) {
+    renderTemplatePreview(null);
+    appendLog("error", `Template inspect failed: ${err}`);
+  }
+}
+
 async function pickTemplate() {
   const selected = await open({
     multiple: false,
@@ -94,6 +254,7 @@ async function pickTemplate() {
   });
   if (typeof selected === "string") {
     ($("template-path") as HTMLInputElement).value = selected;
+    await loadTemplatePreview(selected);
   }
 }
 
@@ -132,6 +293,17 @@ async function pickOutput() {
   }
 }
 
+function selectedTraitIdsForRequest(): string[] | null {
+  if (!($("template-enabled") as HTMLInputElement).checked) {
+    return null;
+  }
+  if (!state.templatePreview) {
+    return null; // backend treats null as “all”
+  }
+  syncTraitSelectionFromDom();
+  return state.selectedTraitIds;
+}
+
 async function runPipeline() {
   const btn = $("run-btn") as HTMLButtonElement;
   btn.disabled = true;
@@ -147,6 +319,7 @@ async function runPipeline() {
       template: {
         enabled: ($("template-enabled") as HTMLInputElement).checked,
         templatePath: ($("template-path") as HTMLInputElement).value || null,
+        selectedTraitIds: selectedTraitIdsForRequest(),
       },
       context: {
         enabled: ($("context-enabled") as HTMLInputElement).checked,
@@ -193,6 +366,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("clear-log").addEventListener("click", () => {
     $("log").textContent = "";
   });
+  $("traits-select-all").addEventListener("click", () => setAllTraits(true));
+  $("traits-select-none").addEventListener("click", () => setAllTraits(false));
 
   for (const id of [
     "assist-provider",

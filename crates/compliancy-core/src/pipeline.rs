@@ -25,6 +25,10 @@ pub struct IsoRuleset {
 pub struct TemplateRuleset {
     pub enabled: bool,
     pub template_path: Option<String>,
+    /// Selected trait ids from the template preview picker.
+    /// `None` = apply all detected traits; `Some([])` = apply none; otherwise the subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_trait_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +285,8 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         None
     };
 
+    let mut transform_opts = docx_core::TransformOptions::all();
+
     if let Some(ref tpl) = template_path {
         if !tpl.exists() {
             log.push(log_line(
@@ -294,10 +300,44 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                 assist: assist_status,
             };
         }
-        log.push(log_line(
-            "info",
-            format!("Using master template: {}", tpl.display()),
-        ));
+        match docx_core::options_from_template(
+            tpl,
+            &docx_core::TraitSelection {
+                selected_ids: req.template.selected_trait_ids.clone(),
+            },
+        ) {
+            Ok((preview, opts)) => {
+                let selected = match &req.template.selected_trait_ids {
+                    None => preview.traits.len(),
+                    Some(ids) => ids.len(),
+                };
+                log.push(log_line(
+                    "info",
+                    format!(
+                        "Using master template: {} ({} / {} trait(s); fonts={}, colours={}, background={})",
+                        tpl.display(),
+                        selected,
+                        preview.traits.len(),
+                        opts.apply_fonts,
+                        opts.apply_colours,
+                        opts.apply_background
+                    ),
+                ));
+                transform_opts = opts;
+            }
+            Err(e) => {
+                log.push(log_line(
+                    "error",
+                    format!("Failed to inspect master template: {e}"),
+                ));
+                return RunResult {
+                    ok: false,
+                    files_written,
+                    log,
+                    assist: assist_status,
+                };
+            }
+        }
     } else {
         log.push(log_line(
             "warn",
@@ -317,7 +357,7 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         let dest = output_dir.join(&file_name);
 
         let result = if let Some(ref tpl) = template_path {
-            docx_core::transform_docx(input, tpl, &dest)
+            docx_core::transform_docx_with_options(input, tpl, &dest, transform_opts)
         } else {
             fs::copy(input, &dest)
                 .map(|_| ())
@@ -605,6 +645,7 @@ mod tests {
             template: TemplateRuleset {
                 enabled: false,
                 template_path: None,
+                selected_trait_ids: None,
             },
             context: ContextRuleset {
                 enabled: true,
@@ -657,6 +698,7 @@ mod tests {
             template: TemplateRuleset {
                 enabled: false,
                 template_path: None,
+                selected_trait_ids: None,
             },
             context: ContextRuleset {
                 enabled: true,

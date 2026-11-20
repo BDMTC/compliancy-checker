@@ -41,7 +41,15 @@ Custom paths:
 cargo run -p docx-core --bin docx-spike -- run \
   --source /path/to/source.docx \
   --template /path/to/master.docx \
-  --output /path/to/out.docx
+  --output /path/to/out.docx \
+  --traits fonts,colours,background
+```
+
+Inspect detected traits (preview picker source) without merging:
+
+```bash
+cargo run -p docx-core --bin docx-spike -- inspect-template \
+  --template crates/docx-core/spike/fixtures/master-template-example.docx
 ```
 
 ## ISO checklist (offline)
@@ -128,8 +136,12 @@ Covers style merge, text extraction, ISO present/missing + export round-trip, an
 - Headers/footers (when not already on the template package), numbering, tables, inline content images from the source.
 - Mid-document behind-doc section backgrounds (only the leading page chrome is kept today).
 - Style-ID remapping when source custom styles don’t exist on the template.
-- UI: after master template load, preview + picker of detected style traits (colours, backgrounds, fonts) to apply all / one / a subset.
 - Required-section / field validation from the master template.
 - Cross-run find/replace (Word often splits text across `w:t` nodes).
 - Assist LLM gap narrative / freeform context.
-- PDF ingest/export.
+- **CC-11** — PDF ingest/export (later; not in the template-trait picker work).
+- **CC-12** — ISO card **RUN FIRST**: run checklist before the main pipeline; pass toast `Compliancy passes: {selected}`; fail modal with reasons from checklist CSV/report, OK + Print one report.
+
+**Done in this area**
+
+- UI + CLI: after master template load, preview + picker of detected style traits (colours, backgrounds, fonts) to apply all / one / a subset; wired into merge apply-path via `TransformOptions` / `selectedTraitIds`.
