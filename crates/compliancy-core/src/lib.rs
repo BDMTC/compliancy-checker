@@ -12,7 +12,8 @@ pub use assist::{
     OpenAiCompatibleProvider,
 };
 pub use pipeline::{
-    run_pipeline, ContextRuleset, IsoRuleset, RunLogLine, RunRequest, RunResult, TemplateRuleset,
+    run_iso_first, run_pipeline, ContextRuleset, IsoFirstRequest, IsoFirstResult, IsoRuleset,
+    RunLogLine, RunRequest, RunResult, TemplateRuleset,
 };
 
 /// Re-export template preview / trait picker types for the Tauri shell.

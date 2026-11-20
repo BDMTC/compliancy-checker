@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use compliancy_core::{
-    AssistConfig, AssistRuntime, AssistStatus, RunRequest, RunResult, TemplatePreview,
+    AssistConfig, AssistRuntime, AssistStatus, IsoFirstRequest, IsoFirstResult, RunRequest,
+    RunResult, TemplatePreview,
 };
 
 #[tauri::command]
@@ -17,6 +18,12 @@ fn get_assist_status(mode: String, assist: Option<AssistConfig>) -> AssistStatus
 #[tauri::command]
 fn run_pipeline(request: RunRequest) -> RunResult {
     compliancy_core::run_pipeline(request)
+}
+
+/// ISO card **RUN FIRST** — checklist only, before the main pipeline.
+#[tauri::command]
+fn run_iso_first(request: IsoFirstRequest) -> IsoFirstResult {
+    compliancy_core::run_iso_first(request)
 }
 
 /// Partially load a master template: detect fonts / colours / backgrounds for the picker.
@@ -42,6 +49,7 @@ fn app_info() -> serde_json::Value {
             "PDF master template cues + PDF export",
             "template trait preview + picker",
             "ISO section checklist export",
+            "ISO RUN FIRST pre-check",
             "structured context rules",
             "Assist OpenAI-compatible LLM hook"
         ],
@@ -61,7 +69,8 @@ pub fn run() {
             app_info,
             get_assist_status,
             inspect_template,
-            run_pipeline
+            run_pipeline,
+            run_iso_first
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

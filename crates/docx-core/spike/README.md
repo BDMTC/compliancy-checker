@@ -139,11 +139,11 @@ Covers style merge, text extraction, ISO present/missing + export round-trip, an
 - Required-section / field validation from the master template.
 - Cross-run find/replace (Word often splits text across `w:t` nodes).
 - Assist LLM gap narrative / freeform context (live path exists; quality hill-climb ongoing).
-- **CC-12** — ISO card **RUN FIRST**: run checklist before the main pipeline; pass toast `Compliancy passes: {selected}`; fail modal with reasons from checklist CSV/report, OK + Print one report.
 
 **Done elsewhere**
 
 - **CC-11** — PDF as master template (cues) + PDF as save/output — see [../../pdf-core/spike/README.md](../../pdf-core/spike/README.md).
+- **CC-12** — ISO card **RUN FIRST**: checklist before the main pipeline; pass toast `Compliancy passes: {selected}`; fail modal with reasons from checklist CSV/report, OK + Print one report (`compliancy-core::run_iso_first` + UI).
 
 **Done in this area**
 

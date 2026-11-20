@@ -38,8 +38,26 @@
             <label class="chip"><input type="checkbox" value="14001" /> ISO 14001</label>
             <label class="chip"><input type="checkbox" value="9001" /> ISO 9001</label>
           </div>
+          <div class="iso-run-first-row">
+            <button type="button" class="btn secondary" id="iso-run-first">RUN FIRST</button>
+            <p class="note iso-run-first-note">Run the ISO checklist <strong>before</strong> the main pipeline. Pass shows a toast; fail opens a popup with reasons (OK / Print).</p>
+          </div>
           <p class="note">Section/clause presence check against ingested .docx text. Exports <code>iso-checklist.csv</code> and <code>iso-checklist-report.txt</code> beside processed docs. Not an accreditation decision.</p>
         </section>
+
+        <div id="iso-pass-toast" class="iso-pass-toast" role="status" aria-live="polite" hidden></div>
+
+        <dialog id="iso-fail-dialog" class="iso-fail-dialog">
+          <form method="dialog" class="iso-fail-form">
+            <h2 id="iso-fail-title">Compliancy check failed</h2>
+            <p class="note" id="iso-fail-summary">Missing clause(s) from the ISO checklist:</p>
+            <ul id="iso-fail-reasons" class="iso-fail-reasons"></ul>
+            <div class="iso-fail-actions">
+              <button type="submit" class="btn secondary" value="ok" id="iso-fail-ok">OK</button>
+              <button type="button" class="btn primary" id="iso-fail-print">Print</button>
+            </div>
+          </form>
+        </dialog>
 
         <section class="panel" aria-labelledby="template-heading">
           <div class="panel-head">

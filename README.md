@@ -16,10 +16,9 @@ Two modes, one codebase:
 - **Master template trait preview + picker:** on template load, detect fonts / colours / backgrounds; select all, one, or a subset before merge apply. Masters may be **`.docx` or `.pdf`**.
 - **PDF export:** selectable **Save as** Word (`.docx`) or PDF (`.pdf`) beside the ingest controls.
 - **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
+- **ISO RUN FIRST (CC-12):** button on the ISO card runs the checklist **before** the main pipeline. Pass → toast `Compliancy passes: {selected standards}`. Fail → popup listing missing reasons from the checklist CSV/report, with **OK** (close) and **Print** (one combined report).
 - **Structured context rules (Standard):** deterministic line/JSON rule language (force heading, find/replace, require section/heading); applied after template merge; writes `context-rules.csv` + `context-rules-report.txt`.
 - **Assist live API hook:** OpenAI-compatible HTTP (OpenAI / Azure / local). Mock fixtures for CI. Standard mode never constructs a live client.
-
-Follow-up (not this PR): **CC-12** ISO card **RUN FIRST** (checklist before pipeline; pass toast / fail modal + Print).
 
 See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for transform spike details, and [crates/pdf-core/spike/README.md](crates/pdf-core/spike/README.md) for PDF master/export limits and CLI.
 
@@ -101,15 +100,25 @@ GNU/`x86_64-pc-windows-gnu` is not supported for this Tauri shell (export-ordina
 3. Browse a master **`.docx` or `.pdf`** — preview detected traits (fonts / colours / backgrounds / page size) and select all, one, or a subset before apply. PDF masters show documented cue limits in the panel.
 4. In Assist: pick provider / model / endpoint; set API key (UI, env, or local config).
 5. Pick input `.docx` files or a folder; pick output directory; choose **Save as** Word or PDF.
-6. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports → write `.docx` or regenerated `.pdf`.
+6. Optional: **RUN FIRST** on the ISO card — checklist only (before pipeline). Pass toast / fail popup with OK + Print. If an output directory is set, also writes the usual checklist CSV + report there.
+7. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports → write `.docx` or regenerated `.pdf`.
 
 ## Pipeline
 
 ```
-ingest → extract → template styles → context rules → ISO checklist → [Assist: ISO gap + freeform] → export (.docx | .pdf)
+[optional ISO RUN FIRST] → ingest → extract → template styles → context rules → ISO checklist → [Assist: ISO gap + freeform] → export (.docx | .pdf)
 ```
 
 ISO checklist is **presence-only** (clause numbers / section title keywords). Context rules are a **fixed rule language**. Assist adds optional LLM narrative only; it does not certify accreditation.
+
+### ISO RUN FIRST (CC-12)
+
+| Outcome | UI |
+|---|---|
+| Pass (no missing clauses) | Toast: `Compliancy passes: ISO 45001` (selected labels) |
+| Fail | Modal lists missing reasons derived from checklist findings (same data as CSV/report); **OK** closes; **Print** prints one combined text+CSV report |
+
+Does not run template merge, context apply, or document export — checklist evaluation only.
 
 ## PDF master + PDF export (CC-11)
 
