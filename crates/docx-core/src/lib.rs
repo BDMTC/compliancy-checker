@@ -6,14 +6,18 @@
 //! - Structured context rules (force heading, replace, require section)
 //!
 //! Transform strategy (Open XML):
-//! 1. Start from the **template** package (styles, theme, fonts, headers/footers, structure).
-//! 2. Extract body block-level children from the **source** `word/document.xml`
+//! 1. Start from the **template** package (styles, theme, fonts, media, headers/footers).
+//! 2. Keep document-level `w:background` and body **chrome** from the template
+//!    (behind-doc DrawingML / VML, drawing-only paragraphs) so page fills and
+//!    background images survive.
+//! 3. Extract body block-level children from the **source** `word/document.xml`
 //!    (everything inside `<w:body>` except a trailing `<w:sectPr>`).
-//! 3. Keep the template's trailing `<w:sectPr>` (page setup / section properties).
-//! 4. Write a new package under `output`.
-//!
-//! Style IDs on source paragraphs (e.g. `Heading1`, `Normal`) resolve against the
-//! template's `styles.xml`, so fonts/colours come from the master as far as Open XML allows.
+//! 4. Strip source **presentation** direct formatting (`w:color`, fonts, sizes, …)
+//!    so per-style colours/typefaces from the template apply. Style IDs are kept —
+//!    Heading styles keep their own colours; Normal/body uses the body style colour.
+//!    We do **not** flatten the document to a single global colour.
+//! 5. Keep the template's trailing `<w:sectPr>` (page setup / section properties).
+//! 6. Write a new package under `output`.
 
 mod context;
 mod extract;
@@ -53,6 +57,11 @@ pub type Result<T> = std::result::Result<T, DocxError>;
 pub(crate) const DOCUMENT_PATH: &str = "word/document.xml";
 
 /// Transform `source` using styles/structure from `template`, writing `output`.
+///
+/// Colour rule: preserve **per-style** (and mapped per-run style) colours from the
+/// master template. Body text resolves through Normal/body; headings keep Heading*
+/// colours. Source direct colour/font/size overrides are stripped so they cannot
+/// flatten or mask those template definitions.
 pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<()> {
     let source_bytes = std::fs::read(source)?;
     let template_bytes = std::fs::read(template)?;
@@ -64,6 +73,7 @@ pub fn transform_docx(source: &Path, template: &Path, output: &Path) -> Result<(
     let template_document = read_zip_entry(&mut template_zip, DOCUMENT_PATH)?;
 
     let source_inner = extract_body_inner(&source_document)?;
+    let source_inner = strip_presentation_overrides(&source_inner);
     let merged_document = splice_body_content(&template_document, &source_inner)?;
 
     let mut parts: HashMap<String, Vec<u8>> = HashMap::new();
@@ -130,7 +140,11 @@ fn extract_body_inner(document_xml: &str) -> Result<String> {
     Ok(inner.trim().to_string())
 }
 
-/// Replace template body content (except trailing sectPr) with `source_inner`.
+/// Replace template body content (except trailing sectPr + chrome) with `source_inner`.
+///
+/// Preserves template `w:background` (outside `w:body`) via the document prefix, and
+/// re-injects body chrome (behind-doc drawings / drawing-only paragraphs) so background
+/// fills and images from the master are not discarded with the template's placeholder text.
 fn splice_body_content(template_document: &str, source_inner: &str) -> Result<String> {
     let body_open = find_tag_end(template_document, "w:body")
         .ok_or_else(|| DocxError::Message("template missing <w:body>".into()))?;
@@ -140,14 +154,26 @@ fn splice_body_content(template_document: &str, source_inner: &str) -> Result<St
 
     let template_inner = &template_document[body_open..body_close];
     let mut sect_pr = String::new();
+    let mut inner_wo_sect = template_inner.to_string();
     if let Some(sect_start) = find_last_open_tag(template_inner, "w:sectPr") {
         if let Some(sect_end_rel) = find_element_end(&template_inner[sect_start..], "w:sectPr") {
             sect_pr = template_inner[sect_start..sect_start + sect_end_rel].to_string();
+            inner_wo_sect = format!(
+                "{}{}",
+                &template_inner[..sect_start],
+                &template_inner[sect_start + sect_end_rel..]
+            );
         }
     }
 
+    let chrome = extract_template_chrome(&inner_wo_sect);
+
     let mut new_inner = String::new();
     new_inner.push('\n');
+    if !chrome.is_empty() {
+        new_inner.push_str(&chrome);
+        new_inner.push('\n');
+    }
     new_inner.push_str(source_inner);
     new_inner.push('\n');
     if !sect_pr.is_empty() {
@@ -155,11 +181,173 @@ fn splice_body_content(template_document: &str, source_inner: &str) -> Result<St
         new_inner.push('\n');
     }
 
-    let mut out = String::with_capacity(template_document.len() + source_inner.len());
+    let mut out = String::with_capacity(template_document.len() + source_inner.len() + chrome.len());
     out.push_str(&template_document[..body_open]);
     out.push_str(&new_inner);
     out.push_str(&template_document[body_close..]);
     Ok(out)
+}
+
+/// Body paragraphs that carry page/background visuals (not factual text).
+///
+/// Word often stores branded backgrounds as `wp:anchor behindDoc="1"` DrawingML (or VML
+/// picts) inside ordinary body paragraphs — not only as `w:background`. Those must be
+/// kept when swapping in source text.
+fn extract_template_chrome(template_body_inner: &str) -> String {
+    let mut chrome = String::new();
+    let mut rest = template_body_inner;
+    while let Some(start) = find_next_open_tag(rest, "w:p") {
+        let abs = rest;
+        let from = &abs[start..];
+        let Some(end) = find_element_end(from, "w:p") else {
+            break;
+        };
+        let para = &from[..end];
+        if is_chrome_paragraph(para) {
+            chrome.push_str(para);
+            chrome.push('\n');
+        }
+        rest = &from[end..];
+    }
+    chrome
+}
+
+fn is_chrome_paragraph(para: &str) -> bool {
+    let has_draw = para.contains("<w:drawing>") || para.contains("<w:pict>");
+    if !has_draw {
+        return false;
+    }
+    if para.contains("behindDoc=\"1\"") {
+        return true;
+    }
+    !paragraph_has_meaningful_text(para)
+}
+
+fn paragraph_has_meaningful_text(para: &str) -> bool {
+    let mut rest = para;
+    while let Some(start) = rest.find("<w:t") {
+        let after = &rest[start..];
+        let Some(gt) = after.find('>') else {
+            break;
+        };
+        let content_start = gt + 1;
+        let Some(close) = after[content_start..].find("</w:t>") else {
+            break;
+        };
+        let text = &after[content_start..content_start + close];
+        if text.chars().any(|c| !c.is_whitespace()) {
+            return true;
+        }
+        rest = &after[content_start + close + "</w:t>".len()..];
+    }
+    false
+}
+
+/// Remove presentation direct-formatting that would override template style colours/fonts.
+///
+/// Keeps `w:pStyle` / `w:rStyle` so Heading1 vs Normal (and character styles) still select
+/// distinct template colours. Semantic emphasis (`w:b`, `w:i`, …) is left intact.
+fn strip_presentation_overrides(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find("<w:rPr") {
+        out.push_str(&rest[..start]);
+        let from = &rest[start..];
+        let Some(end) = find_element_end(from, "w:rPr") else {
+            out.push_str(from);
+            return out;
+        };
+        let rpr = &from[..end];
+        let cleaned = clean_rpr_element(rpr);
+        out.push_str(&cleaned);
+        rest = &from[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn clean_rpr_element(rpr: &str) -> String {
+    let first_gt = match rpr.find('>') {
+        Some(i) => i,
+        None => return rpr.to_string(),
+    };
+    // Self-closing empty rPr
+    if rpr.as_bytes().get(first_gt.saturating_sub(1)) == Some(&b'/') {
+        return String::new();
+    }
+    let inner = &rpr[first_gt + 1..rpr.len() - "</w:rPr>".len()];
+    let cleaned_inner = strip_presentation_children(inner);
+    if cleaned_inner
+        .chars()
+        .all(|c| c.is_whitespace())
+    {
+        return String::new();
+    }
+    format!("<w:rPr>{cleaned_inner}</w:rPr>")
+}
+
+fn strip_presentation_children(inner: &str) -> String {
+    // Child local names that paint presentation from the source and must yield to template styles.
+    const STRIP: &[&str] = &[
+        "w:color",
+        "w:rFonts",
+        "w:sz",
+        "w:szCs",
+        "w:highlight",
+        "w:shd",
+        "w:bdr",
+        "w:em",
+        "w:snapToGrid",
+        "w:spacing", // character spacing
+        "w:w",       // character scale
+        "w:kern",
+        "w:position",
+        "w:vanish",
+    ];
+    let mut out = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let from = &rest[lt..];
+        if from.starts_with("</") {
+            // Unexpected close — copy through
+            out.push('<');
+            rest = &from[1..];
+            continue;
+        }
+        let name_end = from[1..]
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        let name = &from[1..name_end];
+        if STRIP.iter().any(|s| *s == name) {
+            if let Some(end) = find_element_end(from, name) {
+                rest = &from[end..];
+                continue;
+            }
+        }
+        out.push('<');
+        rest = &from[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn find_next_open_tag(xml: &str, local: &str) -> Option<usize> {
+    let open = format!("<{local}");
+    let mut search_from = 0;
+    while let Some(rel) = xml[search_from..].find(&open) {
+        let at = search_from + rel;
+        let after_name = at + open.len();
+        let next = xml.as_bytes().get(after_name).copied();
+        // Ensure we matched the element name boundary (`<w:p ` / `<w:p>`), not `<w:pPr` etc.
+        if next == Some(b'>') || next == Some(b' ') || next == Some(b'/') || next == Some(b'\n') || next == Some(b'\r') || next == Some(b'\t')
+        {
+            return Some(at);
+        }
+        search_from = after_name;
+    }
+    None
 }
 
 fn find_tag_end(xml: &str, local: &str) -> Option<usize> {
@@ -196,10 +384,6 @@ pub fn write_minimal_docx(
     styles_xml: &str,
     theme_xml: Option<&str>,
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let mut body = String::new();
     for (style, text) in paragraphs {
         let style_id = if *style == "title" {
@@ -226,49 +410,7 @@ pub fn write_minimal_docx(
 </w:document>"#
     );
 
-    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
-</Types>"#;
-
-    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>"#;
-
-    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
-</Relationships>"#;
-
-    let theme = theme_xml.unwrap_or(DEFAULT_THEME);
-
-    let out_file = File::create(path)?;
-    let mut writer = ZipWriter::new(out_file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(0o644);
-
-    let entries = [
-        ("[Content_Types].xml", content_types),
-        ("_rels/.rels", rels),
-        ("word/document.xml", document_xml.as_str()),
-        ("word/_rels/document.xml.rels", doc_rels),
-        ("word/styles.xml", styles_xml),
-        ("word/theme/theme1.xml", theme),
-    ];
-
-    for (name, data) in entries {
-        writer.start_file(name, options)?;
-        writer.write_all(data.as_bytes())?;
-    }
-    writer.finish()?;
-    Ok(())
+    write_package_with_document(path, &document_xml, styles_xml, theme_xml)
 }
 
 fn paragraph_xml(style_id: &str, text: &str) -> String {
@@ -392,10 +534,138 @@ const DEFAULT_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="
   </a:themeElements>
 </a:theme>"#;
 
+/// Like [`write_minimal_docx`], but each run carries direct black colour / TNR formatting
+/// (simulates Word source docs whose `w:rPr` would otherwise mask template style colours).
+pub fn write_docx_with_direct_formatting(
+    path: &Path,
+    title_style_id: &str,
+    body_style_id: &str,
+    paragraphs: &[(&str, &str)],
+    styles_xml: &str,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut body = String::new();
+    for (style, text) in paragraphs {
+        let style_id = if *style == "title" {
+            title_style_id
+        } else {
+            body_style_id
+        };
+        let escaped = xml_escape(text);
+        body.push_str(&format!(
+            r#"<w:p>
+  <w:pPr>
+    <w:pStyle w:val="{style_id}"/>
+    <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/><w:color w:val="000000"/></w:rPr>
+  </w:pPr>
+  <w:r>
+    <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/><w:color w:val="000000"/></w:rPr>
+    <w:t xml:space="preserve">{escaped}</w:t>
+  </w:r>
+</w:p>
+"#
+        ));
+    }
+    body.push_str(
+        r#"<w:sectPr>
+  <w:pgSz w:w="12240" w:h="15840"/>
+  <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+</w:sectPr>"#,
+    );
+
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+{body}
+  </w:body>
+</w:document>"#
+    );
+
+    // Reuse package shell from write_minimal_docx by writing styles + theme the same way.
+    write_package_with_document(path, &document_xml, styles_xml, None)
+}
+
+fn write_package_with_document(
+    path: &Path,
+    document_xml: &str,
+    styles_xml: &str,
+    theme_xml: Option<&str>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+</Types>"#;
+
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#;
+
+    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+
+    let theme = theme_xml.unwrap_or(DEFAULT_THEME);
+
+    let out_file = File::create(path)?;
+    let mut writer = ZipWriter::new(out_file);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+
+    let entries = [
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", rels),
+        ("word/document.xml", document_xml),
+        ("word/_rels/document.xml.rels", doc_rels),
+        ("word/styles.xml", styles_xml),
+        ("word/theme/theme1.xml", theme),
+    ];
+
+    for (name, data) in entries {
+        writer.start_file(name, options)?;
+        writer.write_all(data.as_bytes())?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn read_out(path: &Path) -> (String, HashMap<String, String>, Vec<String>) {
+        let out_bytes = std::fs::read(path).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(out_bytes)).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .filter(|n| !n.ends_with('/'))
+            .collect();
+        let mut parts = HashMap::new();
+        for name in &names {
+            if let Ok(s) = read_zip_entry(&mut zip, name) {
+                parts.insert(name.clone(), s);
+            }
+        }
+        let document = parts.get(DOCUMENT_PATH).cloned().unwrap_or_default();
+        (document, parts, names)
+    }
 
     #[test]
     fn transform_preserves_source_text_and_uses_template_styles() {
@@ -433,16 +703,149 @@ mod tests {
 
         transform_docx(&source, &template, &output).unwrap();
 
-        let out_bytes = std::fs::read(&output).unwrap();
-        let mut zip = ZipArchive::new(Cursor::new(out_bytes)).unwrap();
-        let document = read_zip_entry(&mut zip, DOCUMENT_PATH).unwrap();
-        let styles = read_zip_entry(&mut zip, "word/styles.xml").unwrap();
+        let (document, parts, _) = read_out(&output);
+        let styles = parts.get("word/styles.xml").unwrap();
 
         assert!(document.contains("Acme Works Ltd"));
         assert!(document.contains("12 Harbour Road, Bristol BS1 1AA"));
         assert!(!document.contains("TEMPLATE PLACEHOLDER"));
         assert!(styles.contains("Calibri"));
         assert!(styles.contains("C45911"));
+        assert!(styles.contains("1F4E79"));
         assert!(!styles.contains("Times New Roman"));
+    }
+
+    #[test]
+    fn transform_strips_source_direct_colour_so_per_style_colours_apply() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures-test-colour");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = dir.join("source.docx");
+        let template = dir.join("template.docx");
+        let output = dir.join("out.docx");
+
+        write_docx_with_direct_formatting(
+            &source,
+            "Heading1",
+            "Normal",
+            &[
+                ("title", "Heading stays orange via style"),
+                ("body", "Body stays navy via style"),
+            ],
+            SAMPLE_STYLES,
+        )
+        .unwrap();
+
+        write_minimal_docx(
+            &template,
+            "Heading1",
+            "Normal",
+            &[("title", "TEMPLATE"), ("body", "x")],
+            TEMPLATE_STYLES,
+            None,
+        )
+        .unwrap();
+
+        transform_docx(&source, &template, &output).unwrap();
+        let (document, parts, _) = read_out(&output);
+        let styles = parts.get("word/styles.xml").unwrap();
+
+        assert!(document.contains("Heading stays orange via style"));
+        assert!(document.contains("Body stays navy via style"));
+        // Direct black from source must not remain on runs/paragraph marks.
+        assert!(
+            !document.contains("w:color"),
+            "source direct w:color should be stripped; colours come from template styles"
+        );
+        assert!(!document.contains("Times New Roman"));
+        // Distinct per-style colours remain in the template styles part (not flattened).
+        assert!(styles.contains("C45911"), "Heading1 colour");
+        assert!(styles.contains("1F4E79"), "Normal/body colour");
+        assert!(document.contains("w:pStyle w:val=\"Heading1\""));
+        assert!(document.contains("w:pStyle w:val=\"Normal\""));
+    }
+
+    #[test]
+    fn transform_keeps_template_background_and_media_from_real_structure_fixture() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures");
+        let template = fixtures.join("master-template-example.docx");
+        assert!(
+            template.exists(),
+            "missing slimmed Beau master fixture at {}",
+            template.display()
+        );
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spike/fixtures-test-bg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.docx");
+        let output = dir.join("out.docx");
+
+        write_docx_with_direct_formatting(
+            &source,
+            "Heading1",
+            "Normal",
+            &[
+                ("title", "Site Safety Report"),
+                ("body", "Customer: Acme Works Ltd — factual body preserved."),
+            ],
+            SAMPLE_STYLES,
+        )
+        .unwrap();
+
+        transform_docx(&source, &template, &output).unwrap();
+        let (document, parts, names) = read_out(&output);
+
+        assert!(document.contains("Acme Works Ltd"));
+        assert!(!document.contains("MASTER TEMPLATE PLACEHOLDER"));
+        assert!(
+            document.contains("behindDoc=\"1\""),
+            "template behind-doc DrawingML chrome must survive"
+        );
+        assert!(
+            document.contains("<w:background"),
+            "document w:background fill must survive"
+        );
+        assert!(
+            document.contains("r:embed=") || document.contains("a:blip"),
+            "background image relationship/blip must survive"
+        );
+        assert!(
+            names.iter().any(|k| k.starts_with("word/media/")),
+            "template media part must remain in package"
+        );
+
+        // Per-style colours from real Word styles2.xml + theme (not a single global colour).
+        let styles = parts
+            .get("word/styles2.xml")
+            .expect("real Word packages may use styles2.xml");
+        assert!(styles.contains("068145"), "Heading1 / accent green");
+        assert!(
+            styles.contains("themeColor=\"text1\"") || styles.contains("000000"),
+            "Normal/body colour distinct from heading"
+        );
+        let theme = parts
+            .get("word/theme/theme11.xml")
+            .expect("theme11.xml from master");
+        assert!(theme.contains("068145") || theme.contains("Catering Colors"));
+        // Source direct `<w:color…/>` stripped (document `w:background w:color=` may remain).
+        assert!(
+            !document.contains("<w:color"),
+            "run/paragraph direct <w:color> overrides must be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_presentation_keeps_bold_and_styles() {
+        let xml = r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:i/><w:color w:val="FF0000"/><w:rFonts w:ascii="Arial"/></w:rPr><w:t>Hi</w:t></w:r></w:p>"#;
+        let out = strip_presentation_overrides(xml);
+        assert!(out.contains("w:pStyle w:val=\"Heading1\""));
+        assert!(out.contains("<w:b/>"));
+        assert!(out.contains("<w:i/>"));
+        assert!(!out.contains("w:color"));
+        assert!(!out.contains("w:rFonts"));
+        assert!(!out.contains("w:sz"));
+        assert!(out.contains(">Hi<"));
     }
 }
