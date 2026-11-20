@@ -38,6 +38,10 @@ pub struct ContextRuleset {
     pub text: String,
 }
 
+fn default_output_format() -> String {
+    "docx".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
@@ -45,6 +49,9 @@ pub struct RunRequest {
     pub mode: String,
     pub input_paths: Vec<String>,
     pub output_dir: String,
+    /// `docx` | `pdf` — selectable save/output format (default `docx`).
+    #[serde(default = "default_output_format")]
+    pub output_format: String,
     pub iso: IsoRuleset,
     pub template: TemplateRuleset,
     pub context: ContextRuleset,
@@ -265,6 +272,16 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         };
     }
 
+    let output_format = if req.output_format.eq_ignore_ascii_case("pdf") {
+        "pdf"
+    } else {
+        "docx"
+    };
+    log.push(log_line(
+        "info",
+        format!("Output format: {output_format}"),
+    ));
+
     let template_path = if req.template.enabled {
         match req.template.template_path.as_ref() {
             Some(p) if !p.is_empty() => Some(PathBuf::from(p)),
@@ -286,6 +303,14 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
     };
 
     let mut transform_opts = docx_core::TransformOptions::all();
+    let mut template_preview: Option<docx_core::TemplatePreview> = None;
+    // Effective `.docx` master used by Open XML merge (original or PDF-synthesised).
+    let mut merge_template: Option<PathBuf> = None;
+    let mut synthetic_template_path: Option<PathBuf> = None;
+
+    let selection = docx_core::TraitSelection {
+        selected_ids: req.template.selected_trait_ids.clone(),
+    };
 
     if let Some(ref tpl) = template_path {
         if !tpl.exists() {
@@ -300,42 +325,95 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                 assist: assist_status,
             };
         }
-        match docx_core::options_from_template(
-            tpl,
-            &docx_core::TraitSelection {
-                selected_ids: req.template.selected_trait_ids.clone(),
-            },
-        ) {
-            Ok((preview, opts)) => {
-                let selected = match &req.template.selected_trait_ids {
-                    None => preview.traits.len(),
-                    Some(ids) => ids.len(),
-                };
-                log.push(log_line(
-                    "info",
-                    format!(
-                        "Using master template: {} ({} / {} trait(s); fonts={}, colours={}, background={})",
-                        tpl.display(),
-                        selected,
-                        preview.traits.len(),
-                        opts.apply_fonts,
-                        opts.apply_colours,
-                        opts.apply_background
-                    ),
-                ));
-                transform_opts = opts;
+
+        if pdf_core::is_pdf(tpl) {
+            let synth = output_dir.join(".compliancy-synthetic-master.docx");
+            match pdf_core::materialise_docx_master(tpl, &selection, &synth) {
+                Ok(Some((preview, opts))) => {
+                    let selected = match &req.template.selected_trait_ids {
+                        None => preview.traits.len(),
+                        Some(ids) => ids.len(),
+                    };
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "Using PDF master template: {} ({} / {} trait(s); fonts={}, colours={}, background={})",
+                            tpl.display(),
+                            selected,
+                            preview.traits.len(),
+                            opts.apply_fonts,
+                            opts.apply_colours,
+                            opts.apply_background
+                        ),
+                    ));
+                    for limit in preview.limits.iter().take(3) {
+                        log.push(log_line("info", format!("PDF limit: {limit}")));
+                    }
+                    transform_opts = opts;
+                    template_preview = Some(preview);
+                    merge_template = Some(synth.clone());
+                    synthetic_template_path = Some(synth);
+                }
+                Ok(None) => {
+                    log.push(log_line(
+                        "error",
+                        "PDF master materialisation returned no template.",
+                    ));
+                    return RunResult {
+                        ok: false,
+                        files_written,
+                        log,
+                        assist: assist_status,
+                    };
+                }
+                Err(e) => {
+                    log.push(log_line(
+                        "error",
+                        format!("Failed to inspect/materialise PDF master: {e}"),
+                    ));
+                    return RunResult {
+                        ok: false,
+                        files_written,
+                        log,
+                        assist: assist_status,
+                    };
+                }
             }
-            Err(e) => {
-                log.push(log_line(
-                    "error",
-                    format!("Failed to inspect master template: {e}"),
-                ));
-                return RunResult {
-                    ok: false,
-                    files_written,
-                    log,
-                    assist: assist_status,
-                };
+        } else {
+            match docx_core::options_from_template(tpl, &selection) {
+                Ok((preview, opts)) => {
+                    let selected = match &req.template.selected_trait_ids {
+                        None => preview.traits.len(),
+                        Some(ids) => ids.len(),
+                    };
+                    log.push(log_line(
+                        "info",
+                        format!(
+                            "Using master template: {} ({} / {} trait(s); fonts={}, colours={}, background={})",
+                            tpl.display(),
+                            selected,
+                            preview.traits.len(),
+                            opts.apply_fonts,
+                            opts.apply_colours,
+                            opts.apply_background
+                        ),
+                    ));
+                    transform_opts = opts;
+                    template_preview = Some(preview);
+                    merge_template = Some(tpl.clone());
+                }
+                Err(e) => {
+                    log.push(log_line(
+                        "error",
+                        format!("Failed to inspect master template: {e}"),
+                    ));
+                    return RunResult {
+                        ok: false,
+                        files_written,
+                        log,
+                        assist: assist_status,
+                    };
+                }
             }
         }
     } else {
@@ -348,29 +426,39 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
     let mut ok = true;
     let mut iso_reports = Vec::new();
     let mut context_report = docx_core::ContextReport::default();
+    let mut intermediate_docx: Vec<PathBuf> = Vec::new();
 
     for input in &inputs {
-        let file_name = input
-            .file_name()
-            .map(|s| s.to_os_string())
-            .unwrap_or_else(|| "output.docx".into());
-        let dest = output_dir.join(&file_name);
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let docx_name = format!("{stem}.docx");
+        let docx_dest = output_dir.join(&docx_name);
 
-        let result = if let Some(ref tpl) = template_path {
-            docx_core::transform_docx_with_options(input, tpl, &dest, transform_opts)
+        let result = if let Some(ref tpl) = merge_template {
+            docx_core::transform_docx_with_options(input, tpl, &docx_dest, transform_opts)
         } else {
-            fs::copy(input, &dest)
+            fs::copy(input, &docx_dest)
                 .map(|_| ())
                 .map_err(DocxError::from)
         };
 
         match result {
             Ok(()) => {
-                log.push(log_line(
-                    "info",
-                    format!("Wrote {}", dest.display()),
-                ));
-                files_written.push(dest.display().to_string());
+                if output_format == "docx" {
+                    log.push(log_line(
+                        "info",
+                        format!("Wrote {}", docx_dest.display()),
+                    ));
+                    files_written.push(docx_dest.display().to_string());
+                } else {
+                    intermediate_docx.push(docx_dest.clone());
+                    log.push(log_line(
+                        "info",
+                        format!("Prepared intermediate {}", docx_dest.display()),
+                    ));
+                }
             }
             Err(e) => {
                 ok = false;
@@ -383,13 +471,14 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         }
 
         if let Some(ref rules) = context_rules {
-            match docx_core::apply_context_to_docx(&dest, rules) {
+            match docx_core::apply_context_to_docx(&docx_dest, rules) {
                 Ok(report) => {
                     log.push(log_line(
                         "info",
                         format!(
                             "Context {}: {} applied/replaced, {} required misses",
-                            dest.file_name()
+                            docx_dest
+                                .file_name()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("document"),
                             report.applied_count(),
@@ -405,7 +494,37 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                     ok = false;
                     log.push(log_line(
                         "error",
-                        format!("Context rules failed for {}: {e}", dest.display()),
+                        format!("Context rules failed for {}: {e}", docx_dest.display()),
+                    ));
+                }
+            }
+        }
+
+        if output_format == "pdf" {
+            let pdf_dest = output_dir.join(format!("{stem}.pdf"));
+            let cues = match &template_preview {
+                Some(preview) => pdf_core::cues_from_preview(preview, &transform_opts),
+                None => pdf_core::PdfStyleCues::default(),
+            };
+            let export_opts = pdf_core::PdfExportOptions {
+                title: stem.to_string(),
+                cues,
+                apply_fonts: transform_opts.apply_fonts,
+                apply_colours: transform_opts.apply_colours,
+                apply_background: transform_opts.apply_background,
+            };
+            match pdf_core::write_pdf_from_docx(&docx_dest, &pdf_dest, &export_opts) {
+                Ok(()) => {
+                    log.push(log_line("info", format!("Wrote {}", pdf_dest.display())));
+                    files_written.push(pdf_dest.display().to_string());
+                    // Drop intermediate .docx when PDF is the selected output.
+                    let _ = fs::remove_file(&docx_dest);
+                }
+                Err(e) => {
+                    ok = false;
+                    log.push(log_line(
+                        "error",
+                        format!("PDF export failed for {}: {e}", input.display()),
                     ));
                 }
             }
@@ -438,6 +557,11 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                 }
             }
         }
+    }
+
+    let _ = intermediate_docx; // intermediates removed after PDF write
+    if let Some(synth) = synthetic_template_path {
+        let _ = fs::remove_file(synth);
     }
 
     if context_rules.is_some() && !context_report.findings.is_empty() {
@@ -638,6 +762,7 @@ mod tests {
             mode: "standard".into(),
             input_paths: vec![input.display().to_string()],
             output_dir: out.display().to_string(),
+            output_format: "docx".into(),
             iso: IsoRuleset {
                 enabled: true,
                 standards: vec!["45001".into()],
@@ -691,6 +816,7 @@ mod tests {
             mode: "assist".into(),
             input_paths: vec![input.display().to_string()],
             output_dir: out.display().to_string(),
+            output_format: "docx".into(),
             iso: IsoRuleset {
                 enabled: true,
                 standards: vec!["45001".into()],
@@ -731,5 +857,77 @@ mod tests {
         let interpretation =
             fs::read_to_string(out.join("assist-context-interpretation.txt")).unwrap();
         assert!(interpretation.contains("MOCK freeform context"));
+    }
+
+    #[test]
+    fn pdf_output_and_pdf_master_template() {
+        let dir = std::env::temp_dir().join("compliancy-pdf-pipeline");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let input = fixture_docx(&dir);
+        let out = dir.join("out");
+
+        let master = dir.join("master.pdf");
+        pdf_core::write_pdf_from_blocks(
+            &master,
+            &[
+                ("heading", "Brand Heading"),
+                ("body", "Brand body sample."),
+            ],
+            &pdf_core::PdfExportOptions {
+                title: "Master".into(),
+                cues: pdf_core::PdfStyleCues {
+                    body_font: "Helvetica".into(),
+                    heading_font: "Helvetica-Bold".into(),
+                    body_colour: "1F4E79".into(),
+                    heading_colour: "C45911".into(),
+                    page_width_pt: 612.0,
+                    page_height_pt: 792.0,
+                    background_fill: Some("F5F7FA".into()),
+                },
+                apply_fonts: true,
+                apply_colours: true,
+                apply_background: true,
+            },
+        )
+        .unwrap();
+
+        let result = run_pipeline(RunRequest {
+            mode: "standard".into(),
+            input_paths: vec![input.display().to_string()],
+            output_dir: out.display().to_string(),
+            output_format: "pdf".into(),
+            iso: IsoRuleset {
+                enabled: false,
+                standards: vec![],
+            },
+            template: TemplateRuleset {
+                enabled: true,
+                template_path: Some(master.display().to_string()),
+                selected_trait_ids: None,
+            },
+            context: ContextRuleset {
+                enabled: false,
+                text: String::new(),
+            },
+            assist: None,
+        });
+
+        assert!(result.ok, "{:?}", result.log);
+        assert!(result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with(".pdf")));
+        assert!(!result
+            .files_written
+            .iter()
+            .any(|p| p.ends_with("sample.docx")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("PDF master template")));
+        let pdf_path = out.join("sample.pdf");
+        assert!(pdf_path.exists());
+        assert!(pdf_path.metadata().unwrap().len() > 200);
     }
 }

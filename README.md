@@ -13,14 +13,15 @@ Two modes, one codebase:
 
 - Tauri + Vite (TypeScript) app shell with ruleset UI, mode toggle, pickers, Run + log.
 - Rust Open XML `.docx` transform with fixtures and CLI.
-- **Master template trait preview + picker:** on template load, detect fonts / colours / backgrounds; select all, one, or a subset before merge apply.
+- **Master template trait preview + picker:** on template load, detect fonts / colours / backgrounds; select all, one, or a subset before merge apply. Masters may be **`.docx` or `.pdf`**.
+- **PDF export:** selectable **Save as** Word (`.docx`) or PDF (`.pdf`) beside the ingest controls.
 - **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
 - **Structured context rules (Standard):** deterministic line/JSON rule language (force heading, find/replace, require section/heading); applied after template merge; writes `context-rules.csv` + `context-rules-report.txt`.
 - **Assist live API hook:** OpenAI-compatible HTTP (OpenAI / Azure / local). Mock fixtures for CI. Standard mode never constructs a live client.
 
-Follow-ups (not this PR): **CC-11** PDF ingest/export; **CC-12** ISO card **RUN FIRST** (checklist before pipeline; pass toast / fail modal + Print).
+Follow-up (not this PR): **CC-12** ISO card **RUN FIRST** (checklist before pipeline; pass toast / fail modal + Print).
 
-See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for transform spike details, ISO CLI, and context-rules CLI usage.
+See [crates/docx-core/spike/README.md](crates/docx-core/spike/README.md) for transform spike details, and [crates/pdf-core/spike/README.md](crates/pdf-core/spike/README.md) for PDF master/export limits and CLI.
 
 ## Requirements
 
@@ -61,8 +62,16 @@ npm run spike:context
 # → crates/docx-core/spike/out/context-rules.csv
 # → crates/docx-core/spike/out/context-rules-report.txt
 
-# Unit tests (transform + checklist + context rules + Assist mock; no WebView)
+# PDF master fixture + inspect + export (no GUI)
+npm run spike:pdf-fixtures
+npm run spike:pdf-inspect
+npm run spike:pdf-export
+# → crates/pdf-core/spike/fixtures/master-template.pdf
+# → crates/pdf-core/spike/out/styled-output.pdf
+
+# Unit tests (transform + PDF + checklist + context rules + Assist mock; no WebView)
 cargo test -p docx-core
+cargo test -p pdf-core
 cargo test -p compliancy-core
 
 # Full desktop app (needs platform WebView deps)
@@ -89,18 +98,28 @@ GNU/`x86_64-pc-windows-gnu` is not supported for this Tauri shell (export-ordina
 
 1. Choose **Standard** or **Assist**.
 2. Toggle rulesets: ISO standards, master template path, context rules text.
-3. Browse a master `.docx` — preview detected traits (fonts / colours / backgrounds) and select all, one, or a subset before apply.
+3. Browse a master **`.docx` or `.pdf`** — preview detected traits (fonts / colours / backgrounds / page size) and select all, one, or a subset before apply. PDF masters show documented cue limits in the panel.
 4. In Assist: pick provider / model / endpoint; set API key (UI, env, or local config).
-5. Pick input `.docx` files or a folder; pick output directory.
-6. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports.
+5. Pick input `.docx` files or a folder; pick output directory; choose **Save as** Word or PDF.
+6. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports → write `.docx` or regenerated `.pdf`.
 
 ## Pipeline
 
 ```
-ingest → extract → template styles → context rules → ISO checklist → [Assist: ISO gap + freeform] → export
+ingest → extract → template styles → context rules → ISO checklist → [Assist: ISO gap + freeform] → export (.docx | .pdf)
 ```
 
 ISO checklist is **presence-only** (clause numbers / section title keywords). Context rules are a **fixed rule language**. Assist adds optional LLM narrative only; it does not certify accreditation.
+
+## PDF master + PDF export (CC-11)
+
+| Capability | Behaviour |
+|---|---|
+| PDF as master template | Inspect BaseFont names, MediaBox page size, sampled content colours; trait picker same as Word. For Word output, cues become a **synthetic styles** `.docx` then Open XML merge. |
+| PDF as save/output | After merge/context, regenerate a PDF from extracted text + selected cues (Type1 font mapping). Intermediate `.docx` is not kept when PDF is selected. |
+| Inputs | Still `.docx` only (scanned PDF ingest / OCR is out of scope). |
+
+**Limits:** not a binary restyle; no embedded-font subsetting; no headers/footers/images/multi-column from the PDF master; colour sampling is best-effort; scanned PDFs yield little; PDF export flattens tables/images to text. Details: [crates/pdf-core/spike/README.md](crates/pdf-core/spike/README.md).
 
 ## Assist mode (optional LLM)
 
@@ -201,6 +220,8 @@ Missing `require_*` checks fail the run (`ok: false`) and are listed in the cont
 ├── src/                         # Vite + TypeScript UI
 ├── crates/docx-core/            # Open XML merge, extract, ISO, context rules
 │   └── spike/                   # Fixtures, output, spike README
+├── crates/pdf-core/             # PDF master inspect + PDF export
+│   └── spike/                   # PDF fixtures, output, limits README
 ├── crates/compliancy-core/      # Pipeline + Assist LLM hook (CI-testable)
 ├── src-tauri/                   # Tauri desktop shell
 ├── assist.example.json          # Sample Assist config (no secrets)

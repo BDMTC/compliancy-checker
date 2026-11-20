@@ -17,6 +17,9 @@ pub use pipeline::{
 
 /// Re-export template preview / trait picker types for the Tauri shell.
 pub use docx_core::{
-    inspect_template, DetectedTrait, TemplatePreview, TemplatePreviewSummary, TraitKind,
-    TraitSelection, TransformOptions,
+    DetectedTrait, TemplatePreview, TemplatePreviewSummary, TraitKind, TraitSelection,
+    TransformOptions,
 };
+
+/// Inspect `.docx` or `.pdf` masters (dispatches by extension).
+pub use pdf_core::inspect_any_template as inspect_template;

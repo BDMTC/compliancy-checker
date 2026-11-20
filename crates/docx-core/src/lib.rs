@@ -639,6 +639,169 @@ pub const SAMPLE_STYLES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalo
   </w:style>
 </w:styles>"#;
 
+/// Style cues used when synthesising a master `.docx` from a non-Word template (e.g. PDF).
+#[derive(Debug, Clone)]
+pub struct SyntheticStyleCues {
+    pub body_font: String,
+    pub heading_font: String,
+    pub body_colour: String,
+    pub heading_colour: String,
+    /// Page width in twips (1/20 pt). Default letter ≈ 12240.
+    pub page_width_twips: u32,
+    /// Page height in twips. Default letter ≈ 15840.
+    pub page_height_twips: u32,
+    /// Optional document background fill (`#` omitted).
+    pub background_fill: Option<String>,
+}
+
+impl Default for SyntheticStyleCues {
+    fn default() -> Self {
+        Self {
+            body_font: "Calibri".into(),
+            heading_font: "Calibri".into(),
+            body_colour: "1F4E79".into(),
+            heading_colour: "C45911".into(),
+            page_width_twips: 12240,
+            page_height_twips: 15840,
+            background_fill: None,
+        }
+    }
+}
+
+/// Write a minimal master template `.docx` from style cues (PDF → Word bridge).
+///
+/// Body is a single placeholder paragraph so the package is valid for
+/// [`transform_docx_with_options`]; styles/theme/page size carry the cues.
+pub fn write_synthetic_style_template(path: &Path, cues: &SyntheticStyleCues) -> Result<()> {
+    let body_font = xml_escape(&cues.body_font);
+    let heading_font = xml_escape(&cues.heading_font);
+    let body_colour = normalize_hex_colour(&cues.body_colour).unwrap_or_else(|| "1F4E79".into());
+    let heading_colour =
+        normalize_hex_colour(&cues.heading_colour).unwrap_or_else(|| "C45911".into());
+    let fill = cues
+        .background_fill
+        .as_deref()
+        .and_then(normalize_hex_colour);
+
+    let styles_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:qFormat/>
+    <w:rPr>
+      <w:rFonts w:ascii="{body_font}" w:hAnsi="{body_font}"/>
+      <w:sz w:val="22"/>
+      <w:color w:val="{body_colour}"/>
+    </w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/>
+    <w:basedOn w:val="Normal"/>
+    <w:qFormat/>
+    <w:rPr>
+      <w:rFonts w:ascii="{heading_font}" w:hAnsi="{heading_font}"/>
+      <w:b/>
+      <w:sz w:val="36"/>
+      <w:color w:val="{heading_colour}"/>
+    </w:rPr>
+  </w:style>
+</w:styles>"#
+    );
+
+    let bg = fill
+        .as_ref()
+        .map(|h| format!(r#"  <w:background w:color="{h}"/>"#))
+        .unwrap_or_default();
+
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+{bg}
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Normal"/></w:pPr>
+      <w:r><w:t xml:space="preserve">Synthetic template</w:t></w:r>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="{w}" w:h="{h}"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"#,
+        w = cues.page_width_twips,
+        h = cues.page_height_twips,
+    );
+
+    let theme = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Synthetic">
+  <a:themeElements>
+    <a:clrScheme name="Synthetic">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="{body_colour}"/></a:dk2>
+      <a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+      <a:accent1><a:srgbClr val="{body_colour}"/></a:accent1>
+      <a:accent2><a:srgbClr val="{heading_colour}"/></a:accent2>
+      <a:accent3><a:srgbClr val="9BBB59"/></a:accent3>
+      <a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+      <a:accent5><a:srgbClr val="4BACC6"/></a:accent5>
+      <a:accent6><a:srgbClr val="F79646"/></a:accent6>
+      <a:hlink><a:srgbClr val="0000FF"/></a:hlink>
+      <a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Synthetic">
+      <a:majorFont>
+        <a:latin typeface="{heading_font}"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:majorFont>
+      <a:minorFont>
+        <a:latin typeface="{body_font}"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Office">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#
+    );
+
+    write_package_with_document(path, &document_xml, &styles_xml, Some(&theme))
+}
+
+fn normalize_hex_colour(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_start_matches('#').to_ascii_uppercase();
+    if s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
 pub const TEMPLATE_STYLES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">

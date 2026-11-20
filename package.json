@@ -14,7 +14,10 @@
     "spike:inspect-template": "cargo run -p docx-core --bin docx-spike -- inspect-template",
     "spike:iso": "cargo run -p docx-core --bin docx-spike -- iso-checklist",
     "spike:context": "cargo run -p docx-core --bin docx-spike -- context-rules",
-    "test:rust": "cargo test -p docx-core && cargo test -p compliancy-core",
+    "spike:pdf-fixtures": "cargo run -p pdf-core --bin pdf-spike -- generate-fixtures",
+    "spike:pdf-inspect": "cargo run -p pdf-core --bin pdf-spike -- inspect-template",
+    "spike:pdf-export": "cargo run -p pdf-core --bin pdf-spike -- export",
+    "test:rust": "cargo test -p docx-core && cargo test -p pdf-core && cargo test -p compliancy-core",
     "test:assist-mock": "COMPLIANCY_ASSIST_MOCK=1 cargo test -p compliancy-core"
   },
   "dependencies": {
