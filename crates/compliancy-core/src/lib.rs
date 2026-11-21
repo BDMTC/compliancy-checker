@@ -4,12 +4,17 @@
 //! or the mock fixture backend used in CI.
 
 pub mod assist;
+pub mod ingest;
 pub mod pipeline;
 
 pub use assist::{
     interpret_freeform_context, iso_gap_narrative, looks_like_freeform_context, AssistConfig,
     AssistRuntime, AssistStatus, LlmProvider, MockLlmProvider, OfflineProvider,
     OpenAiCompatibleProvider,
+};
+pub use ingest::{
+    classify_input, collect_document_inputs, convert_doc_to_docx, find_soffice,
+    resolve_output_ext, CollectedInput, InputKind, RootScan,
 };
 pub use pipeline::{
     run_iso_first, run_pipeline, ContextRuleset, IsoFirstRequest, IsoFirstResult, IsoRuleset,

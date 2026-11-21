@@ -87,19 +87,24 @@ fn app_info() -> serde_json::Value {
         "name": "Compliancy Checker",
         "version": env!("CARGO_PKG_VERSION"),
         "modes": ["standard", "assist"],
-        "formats": ["docx", "pdf"],
+        "formats": ["match", "docx", "pdf"],
+        "ingest": ["docx", "pdf", "doc"],
         "isoStandards": ["9001", "14001", "45001"],
         "features": [
+            "mixed ingest (.docx / .pdf / legacy .doc)",
+            "match-input or convert-all output",
             "docx template style merge",
             "PDF master template cues + PDF export",
             "template trait preview + picker",
             "ISO section checklist export",
-            "ISO RUN FIRST pre-check",
+            "ISO RUN FIRST pre-check (docx + pdf text)",
+            "structured run summary log",
             "structured context rules",
             "Assist OpenAI-compatible LLM hook"
         ],
         "notes": {
-            "pdf": "PDF masters supply style/layout cues (fonts, colours, page size); export regenerates PDF from extracted text. Scanned PDFs / OCR out of scope."
+            "pdf": "PDF masters supply style/layout cues (fonts, colours, page size); export regenerates PDF from extracted text. Scanned PDFs / OCR out of scope.",
+            "doc": "Legacy .doc converts via LibreOffice/soffice when available; otherwise that file fails with a clear log (never silently skipped)."
         },
     })
 }
