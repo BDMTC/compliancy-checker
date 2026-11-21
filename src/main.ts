@@ -298,35 +298,53 @@ async function pickTemplate() {
   }
 }
 
-function selectedOutputFormat(): "docx" | "pdf" {
+function selectedOutputFormat(): "match" | "docx" | "pdf" {
   const checked = document.querySelector<HTMLInputElement>(
     'input[name="output-format"]:checked',
   );
-  return checked?.value === "pdf" ? "pdf" : "docx";
+  const v = checked?.value;
+  if (v === "pdf") return "pdf";
+  if (v === "docx") return "docx";
+  return "match";
+}
+
+function appendInputPaths(paths: string[]) {
+  const seen = new Set(state.inputPaths);
+  for (const p of paths) {
+    if (!seen.has(p)) {
+      state.inputPaths.push(p);
+      seen.add(p);
+    }
+  }
+  syncInputPathsDisplay();
 }
 
 async function pickFiles() {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [{ name: "Word", extensions: ["docx"] }],
+    filters: [
+      { name: "Documents", extensions: ["docx", "pdf", "doc"] },
+      { name: "Word", extensions: ["docx", "doc"] },
+      { name: "PDF", extensions: ["pdf"] },
+    ],
   });
   if (Array.isArray(selected)) {
-    state.inputPaths = selected;
+    appendInputPaths(selected);
   } else if (typeof selected === "string") {
-    state.inputPaths = [selected];
+    appendInputPaths([selected]);
   }
-  syncInputPathsDisplay();
 }
 
 async function pickFolder() {
   const selected = await open({
-    multiple: false,
+    multiple: true,
     directory: true,
   });
-  if (typeof selected === "string") {
-    state.inputPaths = [selected];
-    syncInputPathsDisplay();
+  if (Array.isArray(selected)) {
+    appendInputPaths(selected);
+  } else if (typeof selected === "string") {
+    appendInputPaths([selected]);
   }
 }
 

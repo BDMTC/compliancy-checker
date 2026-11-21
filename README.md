@@ -1,6 +1,6 @@
 # Compliancy Checker
 
-Windows-first **Tauri** desktop app that ingests `.docx` files, applies selectable rulesets, and exports restyled copies while **preserving factual content**.
+Windows-first **Tauri** desktop app that ingests `.docx` / `.pdf` / legacy `.doc` files, applies selectable rulesets, and exports restyled copies while **preserving factual content**.
 
 Two modes, one codebase:
 
@@ -14,9 +14,13 @@ Two modes, one codebase:
 - Tauri + Vite (TypeScript) app shell with ruleset UI, mode toggle, pickers, Run + log.
 - Rust Open XML `.docx` transform with fixtures and CLI.
 - **Master template trait preview + picker:** on template load, detect fonts / colours / backgrounds; select all, one, or a subset before merge apply. Masters may be **`.docx` or `.pdf`**.
-- **PDF export:** selectable **Save as** Word (`.docx`) or PDF (`.pdf`) beside the ingest controls.
-- **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
-- **ISO RUN FIRST (CC-12):** button on the ISO card runs the checklist **before** the main pipeline. Pass → toast `Compliancy passes: {selected standards}`. Fail → popup listing missing reasons from the checklist CSV/report, with **OK** (close) and **Print** (one combined report).
+- **Mixed ingest (CC-17):** `.docx`, `.pdf`, and legacy `.doc` from multi file/folder picks. Folder walks count all three; unsupported types are logged as skipped (supported types are never silently dropped).
+- **Save as:** default **Match input** (`.doc`/`.docx` → Word, `.pdf` → PDF). Word/PDF radios convert **all** outputs to that format.
+- **Legacy `.doc`:** converts via LibreOffice/`soffice` when available; otherwise that file fails with a clear log (not skipped).
+- **Run summary log:** per active input directory (and overall when multi-path): directory path, file counts, successful / unsuccessful / skipped, total complete / fail, output-directory file count.
+- **PDF export:** selectable **Save as** Match input / Word / PDF beside the ingest controls.
+- **ISO checklist (Standard):** selectable 9001 / 14001 / 45001 section/clause presence against ingested `.docx` or best-effort `.pdf` text; writes `iso-checklist.csv` + `iso-checklist-report.txt` next to processed docs.
+- **ISO RUN FIRST (CC-12):** button on the ISO card runs the checklist **before** the main pipeline (docx + pdf text). Pass → toast `Compliancy passes: {selected standards}`. Fail → popup listing missing reasons from the checklist CSV/report, with **OK** (close) and **Print** (one combined report).
 - **Structured context rules (Standard):** deterministic line/JSON rule language (force heading, find/replace, require section/heading); applied after template merge; writes `context-rules.csv` + `context-rules-report.txt`.
 - **Assist live API hook:** OpenAI-compatible HTTP (OpenAI / Azure / local). Mock fixtures for CI. Standard mode never constructs a live client.
 
@@ -99,9 +103,9 @@ GNU/`x86_64-pc-windows-gnu` is not supported for this Tauri shell (export-ordina
 2. Toggle rulesets: ISO standards, master template path, context rules text.
 3. Browse a master **`.docx` or `.pdf`** — preview detected traits (fonts / colours / backgrounds / page size) and select all, one, or a subset before apply. PDF masters show documented cue limits in the panel.
 4. In Assist: pick provider / model / endpoint; set API key (UI, env, or local config).
-5. Pick input `.docx` files or a folder; pick output directory; choose **Save as** Word or PDF.
-6. Optional: **RUN FIRST** on the ISO card — checklist only (before pipeline). Pass toast / fail popup with OK + Print. If an output directory is set, also writes the usual checklist CSV + report there.
-7. **Run pipeline** — template style merge (selected traits) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports → write `.docx` or regenerated `.pdf`.
+5. Pick input `.docx` / `.pdf` / `.doc` files and/or folders (paths accumulate); pick output directory; choose **Save as** Match input (default), Word, or PDF.
+6. Optional: **RUN FIRST** on the ISO card — checklist only (before pipeline; Word + PDF text). Pass toast / fail popup with OK + Print. If an output directory is set, also writes the usual checklist CSV + report there.
+7. **Run pipeline** — ingest/convert → template style merge (Word) or PDF cues (PDF path) → structured context apply → ISO checklist → (Assist only) gap narrative / freeform interpretation exports → write matched or convert-all outputs. Run log ends with the per-directory summary block.
 
 ## Pipeline
 
@@ -120,15 +124,26 @@ ISO checklist is **presence-only** (clause numbers / section title keywords). Co
 
 Does not run template merge, context apply, or document export — checklist evaluation only.
 
+## Mixed document ingest (CC-17)
+
+| Capability | Behaviour |
+|---|---|
+| Inputs | `.docx`, `.pdf`, legacy `.doc` from file picks and top-level folder walks; multiple paths/folders OK. |
+| Match input (default) | `.doc`/`.docx` → `.docx`; `.pdf` → `.pdf`. |
+| Convert-all | Word or PDF radio forces every successful output to that format. |
+| Legacy `.doc` | Headless LibreOffice/`soffice` → `.docx` on ingest. If unavailable, that file is **unsuccessful** with a clear log (Windows: install LibreOffice; `soffice` on PATH or under `C:\Program Files\LibreOffice\program\`). |
+| Template | Word inputs keep Open XML merge; PDF outputs use PDF style cues. |
+| Run summary | For each active input directory (+ overall if multi-path): directory path, total files in directory, successful / unsuccessful / skipped, total complete / fail, total files in output directory. |
+
 ## PDF master + PDF export (CC-11)
 
 | Capability | Behaviour |
 |---|---|
 | PDF as master template | Inspect BaseFont names, MediaBox page size, sampled content colours; trait picker same as Word. For Word output, cues become a **synthetic styles** `.docx` then Open XML merge. |
 | PDF as save/output | After merge/context, regenerate a PDF from extracted text + selected cues (Type1 font mapping). Intermediate `.docx` is not kept when PDF is selected. |
-| Inputs | Still `.docx` only (scanned PDF ingest / OCR is out of scope). |
+| PDF as input | Best-effort content-stream text extract (no OCR). Used for match-input PDF export, PDF→Word materialisation, and ISO RUN FIRST. |
 
-**Limits:** not a binary restyle; no embedded-font subsetting; no headers/footers/images/multi-column from the PDF master; colour sampling is best-effort; scanned PDFs yield little; PDF export flattens tables/images to text. Details: [crates/pdf-core/spike/README.md](crates/pdf-core/spike/README.md).
+**Limits:** not a binary restyle; no embedded-font subsetting; no headers/footers/images/multi-column from the PDF master; colour sampling is best-effort; scanned PDFs yield little text/cues; PDF export flattens tables/images to text. Details: [crates/pdf-core/spike/README.md](crates/pdf-core/spike/README.md).
 
 ## Assist mode (optional LLM)
 

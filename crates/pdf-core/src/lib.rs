@@ -23,9 +23,11 @@
 //!   in PDF export.
 
 mod export;
+mod extract;
 mod inspect;
 
 pub use export::{write_pdf_from_blocks, write_pdf_from_docx, PdfExportOptions};
+pub use extract::{extract_pdf_text, pdf_text_limits, PDF_TEXT_LIMITATIONS};
 pub use inspect::{
     inspect_pdf_template, pdf_limits, cues_from_preview, PdfStyleCues, PDF_LIMITATIONS,
 };

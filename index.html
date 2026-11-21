@@ -51,7 +51,7 @@
             <button type="button" class="btn secondary" id="iso-run-first">RUN FIRST</button>
             <p class="note iso-run-first-note">Run the ISO checklist <strong>before</strong> the main pipeline. Pass shows a toast; fail opens a popup with reasons (OK / Print).</p>
           </div>
-          <p class="note">Section/clause presence check against ingested .docx text. Exports <code>iso-checklist.csv</code> and <code>iso-checklist-report.txt</code> beside processed docs. Not an accreditation decision.</p>
+          <p class="note">Section/clause presence check against ingested .docx / .pdf text (PDF best-effort, no OCR). Exports <code>iso-checklist.csv</code> and <code>iso-checklist-report.txt</code> beside processed docs. Not an accreditation decision.</p>
         </section>
 
         <section class="panel" aria-labelledby="template-heading">
@@ -108,7 +108,7 @@ replace: Acme Works Ltd => ACME Works Limited
             <h2 id="ingest-heading">Ingest &amp; export</h2>
           </div>
           <div class="field-row">
-            <input type="text" id="input-paths" readonly placeholder="Select .docx files or a folder…" />
+            <input type="text" id="input-paths" readonly placeholder="Select .docx / .pdf / .doc files or folders…" />
             <button type="button" class="btn secondary" id="pick-files">Files</button>
             <button type="button" class="btn secondary" id="pick-folder">Folder</button>
           </div>
@@ -118,10 +118,11 @@ replace: Acme Works Ltd => ACME Works Limited
           </div>
           <div class="field-row output-format-row" role="group" aria-label="Output format">
             <span class="output-format-label">Save as</span>
-            <label class="chip"><input type="radio" name="output-format" value="docx" checked /> Word (.docx)</label>
+            <label class="chip"><input type="radio" name="output-format" value="match" checked /> Match input</label>
+            <label class="chip"><input type="radio" name="output-format" value="docx" /> Word (.docx)</label>
             <label class="chip"><input type="radio" name="output-format" value="pdf" /> PDF (.pdf)</label>
           </div>
-          <p class="note">PDF export regenerates a new PDF from extracted text + selected style cues (standard Type1 fonts). It is not a binary restyle of an existing PDF.</p>
+          <p class="note"><strong>Match input</strong> (default): each file keeps its kind (<code>.doc</code>/<code>.docx</code> → Word, <code>.pdf</code> → PDF). Word/PDF radios convert <em>all</em> outputs to that format. PDF export regenerates from extracted text + style cues (not a binary restyle). Legacy <code>.doc</code> needs LibreOffice/<code>soffice</code> on PATH.</p>
         </section>
 
         <section class="panel assist-panel is-hidden" id="assist-panel" aria-labelledby="assist-heading">

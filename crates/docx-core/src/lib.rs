@@ -558,6 +558,24 @@ fn find_element_end(xml: &str, local: &str) -> Option<usize> {
     Some(close_at + close.len())
 }
 
+/// Build a minimal `.docx` from plain text lines (PDF→Word / text materialisation).
+pub fn write_docx_from_plain_lines(path: &Path, lines: &[String]) -> Result<()> {
+    let owned: Vec<(String, String)> = if lines.iter().all(|l| l.trim().is_empty()) {
+        vec![("body".into(), "(empty document)".into())]
+    } else {
+        lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| ("body".to_string(), l.clone()))
+            .collect()
+    };
+    let refs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    write_minimal_docx(path, "Heading1", "Normal", &refs, SAMPLE_STYLES, None)
+}
+
 /// Build a minimal but valid `.docx` (Office Open XML) package.
 pub fn write_minimal_docx(
     path: &Path,

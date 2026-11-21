@@ -1,15 +1,20 @@
 //! High-level pipeline orchestration for the app shell.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use docx_core::{self, DocxError, IsoStandard};
+use docx_core::{self, DocText, DocxError, IsoStandard};
 
 use crate::assist::{
     self, interpret_freeform_context, iso_gap_narrative, looks_like_freeform_context, AssistConfig,
     AssistRuntime, AssistStatus,
+};
+use crate::ingest::{
+    collect_document_inputs, convert_doc_to_docx, count_files_in_dir, resolve_output_ext,
+    CollectedInput, InputKind, RootScan,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +44,7 @@ pub struct ContextRuleset {
 }
 
 fn default_output_format() -> String {
-    "docx".into()
+    "match".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +54,7 @@ pub struct RunRequest {
     pub mode: String,
     pub input_paths: Vec<String>,
     pub output_dir: String,
-    /// `docx` | `pdf` — selectable save/output format (default `docx`).
+    /// `match` (default: per-file) | `docx` | `pdf` (convert-all).
     #[serde(default = "default_output_format")]
     pub output_format: String,
     pub iso: IsoRuleset,
@@ -212,18 +217,20 @@ pub fn run_iso_first(req: IsoFirstRequest) -> IsoFirstResult {
         format!("ISO RUN FIRST standards: {selected}"),
     ));
 
-    let inputs = match collect_docx_inputs(&req.input_paths) {
-        Ok(v) if v.is_empty() => {
+    let collected = match collect_document_inputs(&req.input_paths) {
+        Ok(c) if c.inputs.is_empty() => {
             log.push(log_line(
                 "error",
-                "No .docx inputs found for ISO RUN FIRST.",
+                "No .docx / .pdf / .doc inputs found for ISO RUN FIRST.",
             ));
             return IsoFirstResult {
                 ok: false,
                 passed: false,
                 standards_labels,
                 pass_message,
-                reasons: vec!["No .docx inputs found for ISO RUN FIRST.".into()],
+                reasons: vec![
+                    "No .docx / .pdf / .doc inputs found for ISO RUN FIRST.".into(),
+                ],
                 csv: String::new(),
                 report_text: String::new(),
                 combined_report: String::new(),
@@ -231,7 +238,7 @@ pub fn run_iso_first(req: IsoFirstRequest) -> IsoFirstResult {
                 log,
             };
         }
-        Ok(v) => v,
+        Ok(c) => c,
         Err(e) => {
             log.push(log_line("error", e.clone()));
             return IsoFirstResult {
@@ -249,21 +256,39 @@ pub fn run_iso_first(req: IsoFirstRequest) -> IsoFirstResult {
         }
     };
 
+    push_scan_logs(&mut log, &collected.roots);
+
+    let work_dir = req
+        .output_dir
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".compliancy-iso-work");
+    let _ = fs::create_dir_all(&work_dir);
+
     log.push(log_line(
         "info",
-        format!("Evaluating {} document(s)…", inputs.len()),
+        format!("Evaluating {} document(s)…", collected.inputs.len()),
     ));
+    for limit in pdf_core::pdf_text_limits().iter().take(2) {
+        if collected.inputs.iter().any(|i| i.kind == InputKind::Pdf) {
+            log.push(log_line("info", format!("PDF text limit: {limit}")));
+        }
+    }
 
     let mut reports = Vec::new();
     let mut ok = true;
-    for input in &inputs {
-        match docx_core::evaluate_docx(input, &standards) {
+    for input in &collected.inputs {
+        match evaluate_input_iso(input, &standards, &work_dir, &mut log) {
             Ok(report) => {
                 log.push(log_line(
                     "info",
                     format!(
                         "ISO checklist {}: {} present, {} missing",
                         input
+                            .path
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or("document"),
@@ -277,11 +302,12 @@ pub fn run_iso_first(req: IsoFirstRequest) -> IsoFirstResult {
                 ok = false;
                 log.push(log_line(
                     "error",
-                    format!("ISO checklist failed for {}: {e}", input.display()),
+                    format!("ISO checklist failed for {}: {e}", input.path.display()),
                 ));
             }
         }
     }
+    let _ = fs::remove_dir_all(&work_dir);
 
     if reports.is_empty() {
         return IsoFirstResult {
@@ -360,37 +386,186 @@ fn log_line(level: &str, message: impl Into<String>) -> RunLogLine {
     }
 }
 
-fn collect_docx_inputs(paths: &[String]) -> Result<Vec<PathBuf>, String> {
-    let mut out = Vec::new();
-    for raw in paths {
-        let p = PathBuf::from(raw);
-        if !p.exists() {
-            return Err(format!("input path not found: {}", p.display()));
-        }
-        if p.is_file() {
-            if is_docx(&p) {
-                out.push(p);
+fn push_scan_logs(log: &mut Vec<RunLogLine>, roots: &[RootScan]) {
+    for root in roots {
+        if root.is_directory {
+            log.push(log_line(
+                "info",
+                format!(
+                    "Scan {}: {} file(s) in directory — .docx={}, .pdf={}, .doc={}, skipped unsupported={}",
+                    root.path.display(),
+                    root.total_files_in_dir,
+                    root.docx,
+                    root.pdf,
+                    root.doc,
+                    root.skipped_names.len()
+                ),
+            ));
+            for name in &root.skipped_names {
+                log.push(log_line(
+                    "info",
+                    format!("Skipped unsupported file in {}: {name}", root.path.display()),
+                ));
             }
-        } else if p.is_dir() {
-            for entry in fs::read_dir(&p).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let path = entry.path();
-                if path.is_file() && is_docx(&path) {
-                    out.push(path);
-                }
-            }
+        } else {
+            log.push(log_line(
+                "info",
+                format!(
+                    "Scan (direct picks under {}): .docx={}, .pdf={}, .doc={}",
+                    root.path.display(),
+                    root.docx,
+                    root.pdf,
+                    root.doc
+                ),
+            ));
         }
     }
-    out.sort();
-    out.dedup();
-    Ok(out)
 }
 
-fn is_docx(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("docx"))
-        .unwrap_or(false)
+/// Per-directory counters for the required run-summary block.
+#[derive(Debug, Default, Clone)]
+struct DirCounters {
+    successful: usize,
+    unsuccessful: usize,
+    skipped: usize,
+}
+
+fn push_directory_summary(
+    log: &mut Vec<RunLogLine>,
+    label: &str,
+    dir_path: &Path,
+    total_in_dir: usize,
+    counters: &DirCounters,
+    output_dir: &Path,
+) {
+    let complete = counters.successful;
+    let fail = counters.unsuccessful;
+    let out_count = count_files_in_dir(output_dir);
+    log.push(log_line("info", "——— Run summary ———"));
+    log.push(log_line(
+        "info",
+        format!("Directory information: {label} {}", dir_path.display()),
+    ));
+    log.push(log_line(
+        "info",
+        format!("Total file count in the directory: {total_in_dir}"),
+    ));
+    log.push(log_line(
+        "info",
+        format!("Successful output: {}", counters.successful),
+    ));
+    log.push(log_line(
+        "info",
+        format!("Unsuccessful output: {}", counters.unsuccessful),
+    ));
+    log.push(log_line(
+        "info",
+        format!("Skipped output: {}", counters.skipped),
+    ));
+    log.push(log_line("info", format!("Total complete: {complete}")));
+    log.push(log_line("info", format!("Total fail: {fail}")));
+    log.push(log_line(
+        "info",
+        format!("Total file count in the output directory: {out_count}"),
+    ));
+}
+
+fn evaluate_input_iso(
+    input: &CollectedInput,
+    standards: &[IsoStandard],
+    work_dir: &Path,
+    log: &mut Vec<RunLogLine>,
+) -> Result<docx_core::ChecklistReport, String> {
+    match input.kind {
+        InputKind::Docx => docx_core::evaluate_docx(&input.path, standards).map_err(|e| e.to_string()),
+        InputKind::Pdf => {
+            let text = pdf_core::extract_pdf_text(&input.path).map_err(|e| e.to_string())?;
+            if text.plain.trim().is_empty() {
+                log.push(log_line(
+                    "warn",
+                    format!(
+                        "PDF text extract empty for {} (scanned/image-only or undecodable); ISO may under-report.",
+                        input.path.display()
+                    ),
+                ));
+            }
+            let label = input
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("document.pdf");
+            Ok(docx_core::evaluate_text(label, &text, standards))
+        }
+        InputKind::Doc => {
+            let converted = convert_doc_to_docx(&input.path, work_dir)?;
+            log.push(log_line(
+                "info",
+                format!(
+                    "Converted legacy .doc → {}",
+                    converted
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("converted.docx")
+                ),
+            ));
+            docx_core::evaluate_docx(&converted, standards).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Materialise a working `.docx` for template/context (Word path or PDF→Word).
+fn materialise_working_docx(
+    input: &CollectedInput,
+    work_dir: &Path,
+    log: &mut Vec<RunLogLine>,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    match input.kind {
+        InputKind::Docx => Ok((input.path.clone(), None)),
+        InputKind::Doc => {
+            let converted = convert_doc_to_docx(&input.path, work_dir)?;
+            log.push(log_line(
+                "info",
+                format!(
+                    "Converted legacy .doc for ingest: {} → {}",
+                    input.path.display(),
+                    converted.display()
+                ),
+            ));
+            Ok((converted.clone(), Some(converted)))
+        }
+        InputKind::Pdf => {
+            let text = pdf_core::extract_pdf_text(&input.path).map_err(|e| e.to_string())?;
+            let stem = input
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("from-pdf");
+            let dest = work_dir.join(format!("{stem}-from-pdf.docx"));
+            let lines: Vec<String> = text.plain.lines().map(|s| s.to_string()).collect();
+            docx_core::write_docx_from_plain_lines(&dest, &lines).map_err(|e| e.to_string())?;
+            log.push(log_line(
+                "info",
+                format!(
+                    "Materialised PDF text → {} ({} line(s))",
+                    dest.display(),
+                    lines.len()
+                ),
+            ));
+            Ok((dest.clone(), Some(dest)))
+        }
+    }
+}
+
+fn source_text_for_iso(
+    input: &CollectedInput,
+    working_docx: &Path,
+) -> Result<DocText, String> {
+    match input.kind {
+        InputKind::Pdf => pdf_core::extract_pdf_text(&input.path).map_err(|e| e.to_string()),
+        InputKind::Docx | InputKind::Doc => {
+            docx_core::extract_docx_text(working_docx).map_err(|e| e.to_string())
+        }
+    }
 }
 
 /// Run the local pipeline. Assist semantic steps only run in Assist mode when configured.
@@ -514,8 +689,8 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         None
     };
 
-    let inputs = match collect_docx_inputs(&req.input_paths) {
-        Ok(v) => v,
+    let collected = match collect_document_inputs(&req.input_paths) {
+        Ok(c) => c,
         Err(e) => {
             log.push(log_line("error", e));
             return RunResult {
@@ -527,10 +702,12 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         }
     };
 
-    if inputs.is_empty() {
+    push_scan_logs(&mut log, &collected.roots);
+
+    if collected.inputs.is_empty() {
         log.push(log_line(
             "error",
-            "No .docx inputs found. Pick files or a folder containing .docx.",
+            "No .docx / .pdf / .doc inputs found. Pick files or a folder containing those types.",
         ));
         return RunResult {
             ok: false,
@@ -551,15 +728,26 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
         };
     }
 
-    let output_format = if req.output_format.eq_ignore_ascii_case("pdf") {
-        "pdf"
+    let work_dir = output_dir.join(".compliancy-work");
+    let _ = fs::create_dir_all(&work_dir);
+
+    let fmt_raw = req.output_format.trim().to_ascii_lowercase();
+    let output_mode = if fmt_raw == "pdf" {
+        "pdf (convert-all)"
+    } else if fmt_raw == "docx" || fmt_raw == "word" {
+        "docx (convert-all)"
     } else {
-        "docx"
+        "match input (per-file: .doc/.docx→.docx, .pdf→.pdf)"
     };
     log.push(log_line(
         "info",
-        format!("Output format: {output_format}"),
+        format!("Output format: {output_mode}"),
     ));
+    if collected.inputs.iter().any(|i| i.kind == InputKind::Pdf) {
+        for limit in pdf_core::pdf_text_limits().iter().take(2) {
+            log.push(log_line("info", format!("PDF text limit: {limit}")));
+        }
+    }
 
     let template_path = if req.template.enabled {
         match req.template.template_path.as_ref() {
@@ -705,81 +893,152 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
     let mut ok = true;
     let mut iso_reports = Vec::new();
     let mut context_report = docx_core::ContextReport::default();
-    let mut intermediate_docx: Vec<PathBuf> = Vec::new();
 
-    for input in &inputs {
+    // Counters keyed by source_root path string.
+    let mut dir_counters: BTreeMap<String, DirCounters> = BTreeMap::new();
+    let mut dir_totals: BTreeMap<String, usize> = BTreeMap::new();
+    for root in &collected.roots {
+        let key = root.path.display().to_string();
+        dir_counters.entry(key.clone()).or_default().skipped = root.skipped_names.len();
+        dir_totals.insert(
+            key,
+            if root.is_directory {
+                root.total_files_in_dir
+            } else {
+                root.supported_count()
+            },
+        );
+    }
+    let mut overall = DirCounters::default();
+    for root in &collected.roots {
+        overall.skipped += root.skipped_names.len();
+    }
+
+    for input in &collected.inputs {
+        let root_key = input.source_root.display().to_string();
+        let counters = dir_counters.entry(root_key).or_default();
         let stem = input
+            .path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("output");
-        let docx_name = format!("{stem}.docx");
-        let docx_dest = output_dir.join(&docx_name);
+        let out_ext = resolve_output_ext(&req.output_format, input.kind);
 
-        let result = if let Some(ref tpl) = merge_template {
-            docx_core::transform_docx_with_options(input, tpl, &docx_dest, transform_opts)
-        } else {
-            fs::copy(input, &docx_dest)
-                .map(|_| ())
-                .map_err(DocxError::from)
-        };
-
-        match result {
-            Ok(()) => {
-                if output_format == "docx" {
-                    log.push(log_line(
-                        "info",
-                        format!("Wrote {}", docx_dest.display()),
-                    ));
-                    files_written.push(docx_dest.display().to_string());
-                } else {
-                    intermediate_docx.push(docx_dest.clone());
-                    log.push(log_line(
-                        "info",
-                        format!("Prepared intermediate {}", docx_dest.display()),
-                    ));
-                }
-            }
+        let working = match materialise_working_docx(input, &work_dir, &mut log) {
+            Ok(w) => w,
             Err(e) => {
                 ok = false;
+                counters.unsuccessful += 1;
+                overall.unsuccessful += 1;
                 log.push(log_line(
                     "error",
-                    format!("Failed {}: {e}", input.display()),
+                    format!("Unsuccessful {}: {e}", input.path.display()),
                 ));
                 continue;
             }
-        }
+        };
+        let (working_docx, _temp_docx) = working;
 
-        if let Some(ref rules) = context_rules {
-            match docx_core::apply_context_to_docx(&docx_dest, rules) {
-                Ok(report) => {
-                    log.push(log_line(
-                        "info",
-                        format!(
-                            "Context {}: {} applied/replaced, {} required misses",
-                            docx_dest
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("document"),
-                            report.applied_count(),
-                            report.missing_count()
-                        ),
-                    ));
-                    if report.missing_count() > 0 {
-                        ok = false;
+        // Word path: Open XML merge. PDF path with PDF output: cues on export (below).
+        let use_docx_merge = out_ext == "docx"
+            || input.kind == InputKind::Docx
+            || input.kind == InputKind::Doc
+            || context_rules.is_some();
+
+        let docx_dest = if out_ext == "docx" {
+            output_dir.join(format!("{stem}.docx"))
+        } else {
+            work_dir.join(format!("{stem}-intermediate.docx"))
+        };
+
+        let mut file_ok = true;
+
+        if use_docx_merge {
+            // PDF→PDF uses cues on export (not Open XML merge). Word keeps docx merge.
+            let skip_merge = input.kind == InputKind::Pdf && out_ext == "pdf";
+            let result = if let Some(ref tpl) = merge_template {
+                if skip_merge {
+                    fs::copy(&working_docx, &docx_dest)
+                        .map(|_| ())
+                        .map_err(DocxError::from)
+                } else {
+                    docx_core::transform_docx_with_options(
+                        &working_docx,
+                        tpl,
+                        &docx_dest,
+                        transform_opts,
+                    )
+                }
+            } else {
+                fs::copy(&working_docx, &docx_dest)
+                    .map(|_| ())
+                    .map_err(DocxError::from)
+            };
+
+            match result {
+                Ok(()) => {
+                    if out_ext == "docx" {
+                        log.push(log_line(
+                            "info",
+                            format!("Wrote {}", docx_dest.display()),
+                        ));
+                        files_written.push(docx_dest.display().to_string());
+                    } else {
+                        log.push(log_line(
+                            "info",
+                            format!("Prepared intermediate {}", docx_dest.display()),
+                        ));
                     }
-                    context_report.extend(report);
                 }
                 Err(e) => {
+                    file_ok = false;
                     ok = false;
                     log.push(log_line(
                         "error",
-                        format!("Context rules failed for {}: {e}", docx_dest.display()),
+                        format!("Failed {}: {e}", input.path.display()),
                     ));
+                }
+            }
+        } else if out_ext == "pdf" {
+            // PDF→PDF without context: materialise text blocks directly later.
+            let _ = fs::copy(&working_docx, &docx_dest);
+        }
+
+        if file_ok {
+            if let Some(ref rules) = context_rules {
+                match docx_core::apply_context_to_docx(&docx_dest, rules) {
+                    Ok(report) => {
+                        log.push(log_line(
+                            "info",
+                            format!(
+                                "Context {}: {} applied/replaced, {} required misses",
+                                docx_dest
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("document"),
+                                report.applied_count(),
+                                report.missing_count()
+                            ),
+                        ));
+                        if report.missing_count() > 0 {
+                            ok = false;
+                            file_ok = false;
+                        }
+                        context_report.extend(report);
+                    }
+                    Err(e) => {
+                        file_ok = false;
+                        ok = false;
+                        log.push(log_line(
+                            "error",
+                            format!("Context rules failed for {}: {e}", docx_dest.display()),
+                        ));
+                    }
                 }
             }
         }
 
-        if output_format == "pdf" {
+        if file_ok && out_ext == "pdf" {
             let pdf_dest = output_dir.join(format!("{stem}.pdf"));
             let cues = match &template_preview {
                 Some(preview) => pdf_core::cues_from_preview(preview, &transform_opts),
@@ -792,35 +1051,40 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                 apply_colours: transform_opts.apply_colours,
                 apply_background: transform_opts.apply_background,
             };
+            // PDF path uses style cues; Word path already merged above when applicable.
             match pdf_core::write_pdf_from_docx(&docx_dest, &pdf_dest, &export_opts) {
                 Ok(()) => {
                     log.push(log_line("info", format!("Wrote {}", pdf_dest.display())));
                     files_written.push(pdf_dest.display().to_string());
-                    // Drop intermediate .docx when PDF is the selected output.
-                    let _ = fs::remove_file(&docx_dest);
+                    if docx_dest.starts_with(&work_dir) || out_ext == "pdf" {
+                        let _ = fs::remove_file(&docx_dest);
+                    }
                 }
                 Err(e) => {
+                    file_ok = false;
                     ok = false;
                     log.push(log_line(
                         "error",
-                        format!("PDF export failed for {}: {e}", input.display()),
+                        format!("PDF export failed for {}: {e}", input.path.display()),
                     ));
                 }
             }
         }
 
         if let Some(ref standards) = iso_standards {
-            // Check the ingested source content (facts before/without style merge).
-            match docx_core::evaluate_docx(input, standards) {
-                Ok(report) => {
+            match source_text_for_iso(input, &working_docx) {
+                Ok(text) => {
+                    let label = input
+                        .path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("document");
+                    let report = docx_core::evaluate_text(label, &text, standards);
                     log.push(log_line(
                         "info",
                         format!(
                             "ISO checklist {}: {} present, {} missing",
-                            input
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("document"),
+                            label,
                             report.present_count(),
                             report.missing_count()
                         ),
@@ -829,18 +1093,54 @@ pub fn run_pipeline(req: RunRequest) -> RunResult {
                 }
                 Err(e) => {
                     ok = false;
+                    file_ok = false;
                     log.push(log_line(
                         "error",
-                        format!("ISO checklist failed for {}: {e}", input.display()),
+                        format!("ISO checklist failed for {}: {e}", input.path.display()),
                     ));
                 }
             }
         }
+
+        if file_ok {
+            counters.successful += 1;
+            overall.successful += 1;
+        } else {
+            counters.unsuccessful += 1;
+            overall.unsuccessful += 1;
+        }
     }
 
-    let _ = intermediate_docx; // intermediates removed after PDF write
     if let Some(synth) = synthetic_template_path {
         let _ = fs::remove_file(synth);
+    }
+    let _ = fs::remove_dir_all(&work_dir);
+
+    // Per active input directory (+ overall when multi-path).
+    let multi = collected.roots.len() > 1
+        || req.input_paths.len() > 1
+        || collected.roots.iter().filter(|r| r.is_directory).count() > 1;
+    for root in &collected.roots {
+        let key = root.path.display().to_string();
+        let counters = dir_counters.get(&key).cloned().unwrap_or_default();
+        let total = *dir_totals.get(&key).unwrap_or(&0);
+        let label = if root.is_directory {
+            "active input directory"
+        } else {
+            "direct picks under"
+        };
+        push_directory_summary(&mut log, label, &root.path, total, &counters, &output_dir);
+    }
+    if multi {
+        let total_all: usize = dir_totals.values().sum();
+        push_directory_summary(
+            &mut log,
+            "OVERALL across",
+            Path::new("(all input paths)"),
+            total_all,
+            &overall,
+            &output_dir,
+        );
     }
 
     if context_rules.is_some() && !context_report.findings.is_empty() {
@@ -1317,5 +1617,211 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("Choose input files")));
+    }
+
+    #[test]
+    fn mixed_folder_match_input_and_summary_log() {
+        let dir = std::env::temp_dir().join("compliancy-mixed-folder-run");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let _ = fixture_docx(&dir);
+        write_minimal_docx(
+            &dir.join("word-doc.docx"),
+            "Heading1",
+            "Normal",
+            &[("body", "Word body text.")],
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+        pdf_core::write_pdf_from_blocks(
+            &dir.join("pdf-doc.pdf"),
+            &[("body", "PDF body for match-input.")],
+            &pdf_core::PdfExportOptions {
+                title: "In".into(),
+                cues: pdf_core::PdfStyleCues::default(),
+                apply_fonts: true,
+                apply_colours: true,
+                apply_background: false,
+            },
+        )
+        .unwrap();
+        fs::write(dir.join("legacy.doc"), b"\xd0\xcf\x11\xe0 not-real-ole").unwrap();
+        fs::write(dir.join("readme.txt"), b"skip").unwrap();
+
+        let out = dir.join("out");
+        let result = run_pipeline(RunRequest {
+            mode: "standard".into(),
+            input_paths: vec![dir.display().to_string()],
+            output_dir: out.display().to_string(),
+            output_format: "match".into(),
+            iso: IsoRuleset {
+                enabled: false,
+                standards: vec![],
+            },
+            template: TemplateRuleset {
+                enabled: false,
+                template_path: None,
+                selected_trait_ids: None,
+            },
+            context: ContextRuleset {
+                enabled: false,
+                text: String::new(),
+            },
+            assist: None,
+        });
+
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Scan ") && l.message.contains(".docx=")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Skipped unsupported file") && l.message.contains("readme.txt")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Directory information:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Successful output:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Unsuccessful output:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Skipped output:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Total complete:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Total fail:")));
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("Total file count in the output directory:")));
+
+        assert!(result.files_written.iter().any(|p| p.ends_with("word-doc.docx")));
+        assert!(result.files_written.iter().any(|p| p.ends_with("pdf-doc.pdf")));
+        assert!(result.files_written.iter().any(|p| p.ends_with("sample.docx")));
+
+        let doc_msgs: Vec<_> = result
+            .log
+            .iter()
+            .filter(|l| l.message.to_lowercase().contains(".doc"))
+            .map(|l| l.message.as_str())
+            .collect();
+        assert!(
+            doc_msgs.iter().any(|m| m.contains("Unsuccessful")
+                || m.contains("unavailable")
+                || m.contains("conversion")
+                || m.contains("Converted")),
+            "expected .doc handling log, got: {doc_msgs:?}"
+        );
+    }
+
+    #[test]
+    fn multi_path_emits_overall_summary() {
+        let dir = std::env::temp_dir().join("compliancy-multi-path-run");
+        let _ = fs::remove_dir_all(&dir);
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        write_minimal_docx(
+            &a.join("one.docx"),
+            "Heading1",
+            "Normal",
+            &[("body", "A")],
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+        write_minimal_docx(
+            &b.join("two.docx"),
+            "Heading1",
+            "Normal",
+            &[("body", "B")],
+            SAMPLE_STYLES,
+            None,
+        )
+        .unwrap();
+        let out = dir.join("out");
+        let result = run_pipeline(RunRequest {
+            mode: "standard".into(),
+            input_paths: vec![a.display().to_string(), b.display().to_string()],
+            output_dir: out.display().to_string(),
+            output_format: "match".into(),
+            iso: IsoRuleset {
+                enabled: false,
+                standards: vec![],
+            },
+            template: TemplateRuleset {
+                enabled: false,
+                template_path: None,
+                selected_trait_ids: None,
+            },
+            context: ContextRuleset {
+                enabled: false,
+                text: String::new(),
+            },
+            assist: None,
+        });
+        assert!(result.ok, "{:?}", result.log);
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("OVERALL across")));
+        assert_eq!(
+            result
+                .files_written
+                .iter()
+                .filter(|p| p.ends_with(".docx"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn iso_run_first_accepts_pdf_text() {
+        let dir = std::env::temp_dir().join("compliancy-iso-pdf-first");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("partial.pdf");
+        pdf_core::write_pdf_from_blocks(
+            &pdf,
+            &[
+                ("heading", "4.1 Context of the organization"),
+                ("body", "OH&S policy and worker consultation."),
+            ],
+            &pdf_core::PdfExportOptions {
+                title: "ISO PDF".into(),
+                cues: pdf_core::PdfStyleCues::default(),
+                apply_fonts: true,
+                apply_colours: true,
+                apply_background: false,
+            },
+        )
+        .unwrap();
+
+        let result = run_iso_first(IsoFirstRequest {
+            input_paths: vec![pdf.display().to_string()],
+            standards: vec!["45001".into()],
+            output_dir: None,
+        });
+        assert!(result.ok, "{:?}", result.log);
+        assert!(!result.passed);
+        assert!(result
+            .log
+            .iter()
+            .any(|l| l.message.contains("PDF text limit")));
+        assert!(!result.reasons.is_empty());
     }
 }
